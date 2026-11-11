@@ -88,6 +88,9 @@ func (h *bootHarness) options(root string) BootOptions {
 		},
 		Starter:      func(Command) (Process, error) { return h.child, nil },
 		OpenSnapshot: func(string) (OpaqueFlusher, error) { return h.snapshot, nil },
+		// Tests must never sync the host filesystem: syncfs is unbounded and
+		// would make the suite depend on runner disk pressure.
+		SyncFn: func() error { return nil },
 	}
 }
 

@@ -120,7 +120,7 @@ func readDirNames(fd int) ([]string, error) {
 		_ = unix.Close(dup)
 		return nil, errors.New("wrap directory descriptor")
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 
 	names, err := dir.Readdirnames(-1)
 	if err != nil && !errors.Is(err, io.EOF) {

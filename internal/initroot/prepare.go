@@ -58,10 +58,13 @@ type BootOptions struct {
 	// Logf receives lifecycle messages; nil discards them.
 	Logf LogFunc
 
-	// SetupFn, Starter and OpenSnapshot are injectable for tests.
+	// SetupFn, Starter, OpenSnapshot and SyncFn are injectable for tests.
 	SetupFn      func(Paths) error
 	Starter      Starter
 	OpenSnapshot func(string) (OpaqueFlusher, error)
+	// SyncFn flushes dirty pages before the checkpoint. Nil means Sync, which
+	// syncs the real root filesystem and therefore never belongs in a test.
+	SyncFn func() error
 }
 
 func (o BootOptions) logf(msg string, kv ...any) {
@@ -88,6 +91,9 @@ func Boot(opts BootOptions) (int, error) {
 		opts.OpenSnapshot = func(root string) (OpaqueFlusher, error) {
 			return OpenOpaqueSnapshot(root)
 		}
+	}
+	if opts.SyncFn == nil {
+		opts.SyncFn = Sync
 	}
 	if opts.Command.Env == nil {
 		opts.Command.Env = os.Environ()
@@ -134,7 +140,7 @@ func Boot(opts BootOptions) (int, error) {
 			return fmt.Errorf("refresh opaque index: %w", err)
 		}
 		opts.logf("Refreshed opaque directory index", "opaqueDirs", len(dirs))
-		return Sync()
+		return opts.SyncFn()
 	}
 
 	code, runErr := Run(opts.Command, opts.Starter, ShutdownConfig{

@@ -80,6 +80,11 @@ func startSupervisor(t *testing.T, cfg ShutdownConfig) (<-chan runResult, *fakeP
 	sigs := make(chan os.Signal, 8)
 	cfg.Signals = sigs
 	cfg.Logf = func(msg string, kv ...any) { t.Log(FormatMessage(msg, kv...)) }
+	if cfg.Flush == nil {
+		// Never fall through to the real Sync: syncfs on the test host is
+		// unbounded and would make these tests depend on runner disk pressure.
+		cfg.Flush = func() error { return nil }
+	}
 
 	result := make(chan runResult, 1)
 	go func() {

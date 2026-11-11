@@ -97,7 +97,7 @@ func migrateSubmounts(p Paths) error {
 	if err != nil {
 		return fmt.Errorf("open mountinfo: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	entries, err := ParseMountInfo(f)
 	if err != nil {
@@ -201,17 +201,18 @@ func DropCapabilities() error {
 
 // Sync flushes dirty pages to the root disk before a snapshot or shutdown.
 func Sync() error {
-	if err := unix.Syncfs(openRootDir()); err != nil {
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		unix.Sync()
+		return fmt.Errorf("open / for syncfs: %w", err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	// syncfs only waits for the filesystem behind /. The new root is the
+	// overlay, whose writes land in upper/ on the root disk, so one syncfs
+	// covers every file the user touched.
+	if err := unix.Syncfs(fd); err != nil {
 		unix.Sync()
 		return fmt.Errorf("syncfs root: %w", err)
 	}
 	return nil
-}
-
-func openRootDir() int {
-	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY, 0)
-	if err != nil {
-		return -1
-	}
-	return fd
 }

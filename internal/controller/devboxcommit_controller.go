@@ -259,7 +259,7 @@ func (r *DevBoxCommitReconciler) buildJob(
 	commit *devpilotv1alpha1.DevBoxCommit, source commitSource,
 ) (*batchv1.Job, error) {
 	backoff := int32(0)
-	runAsNonRoot := true
+	runAsNonRoot := false
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      buildJobName(commit),
@@ -283,6 +283,11 @@ func (r *DevBoxCommitReconciler) buildJob(
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
 					AutomountServiceAccountToken: new(false),
+					// The root disk belongs to the user's own processes, which
+					// run as root inside the DevBox; nothing else can read
+					// upper/ or .meta/. Containment comes from the read-only
+					// mount, the dropped capabilities and the absent token, not
+					// from the user ID.
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
 						RunAsUser:    new(int64(commitUserID)),
@@ -303,9 +308,12 @@ func (r *DevBoxCommitReconciler) buildJob(
 	return job, nil
 }
 
-// commitUserID is distroless nonroot; it matches the image's USER so the
-// container needs no capability to write its scratch directory.
-const commitUserID = 65532
+// commitUserID is the identity the build runs as. It has to be root: the
+// snapshot carries an overlay written by root-owned processes inside the
+// DevBox, and devpilot-init leaves its pin in a 0600 .meta/base-image.json, so
+// a non-root reader fails on the very first file it opens. The image itself
+// still declares USER nonroot; only the pod overrides it.
+const commitUserID = 0
 
 func (r *DevBoxCommitReconciler) commitVolumes(pvcName string) []corev1.Volume {
 	vols := []corev1.Volume{

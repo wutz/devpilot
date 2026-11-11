@@ -226,7 +226,10 @@ var _ = Describe("DevBoxCommit Controller", func() {
 
 			pod := job.Spec.Template.Spec
 			Expect(pod.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
-			Expect(pod.SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
+			// The snapshot carries a root-owned overlay; a non-root build
+			// cannot open upper/ or .meta/base-image.json at all.
+			Expect(pod.SecurityContext.RunAsNonRoot).To(HaveValue(BeFalse()))
+			Expect(pod.SecurityContext.RunAsUser).To(HaveValue(BeEquivalentTo(0)))
 			Expect(container.SecurityContext.Capabilities.Drop).To(Equal([]corev1.Capability{capabilityAll}))
 			Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
 		})

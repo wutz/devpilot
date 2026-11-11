@@ -47,6 +47,9 @@ type DevBoxCommitReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Config Config
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache. Nil falls back to Client, which is only correct in tests.
+	APIReader client.Reader
 	// Flusher pushes a running DevBox's page cache to its root disk before an
 	// online snapshot. Nil means no flush; production wires the exec one.
 	Flusher RootDiskFlusher
@@ -117,6 +120,13 @@ func (r *DevBoxCommitReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	if commit.Status.Phase == devpilotv1alpha1.CommitPhaseSucceeded ||
 		commit.Status.Phase == devpilotv1alpha1.CommitPhaseFailed {
+		// The terminal phase already released the Job, but that delete wakes a
+		// reconcile whose cached copy may still read Building; it then creates
+		// the Job again, and nothing on the commit's side ever looks at it a
+		// second time. Releasing here is idempotent and closes that race.
+		if err := r.releaseBuildJob(ctx, commit); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(commit, CommitFinalizer) {
@@ -219,6 +229,23 @@ func (r *DevBoxCommitReconciler) buildJobFor(
 func (r *DevBoxCommitReconciler) ensureBuildJob(
 	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, box *devpilotv1alpha1.DevBox, source commitSource,
 ) (*batchv1.Job, error) {
+	// The commit reached a terminal phase while this reconcile was building up
+	// to the Job, so the callback is a stale queue entry. Read it back from the
+	// API rather than the cache: a delete event can arrive before the cache
+	// catches up, and starting a Job then leaks one that never schedules.
+	fresh := &devpilotv1alpha1.DevBoxCommit{}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(commit), fresh); err != nil {
+		return nil, fmt.Errorf("get commit %s: %w", commit.Name, err)
+	}
+	if fresh.Status.Phase == devpilotv1alpha1.CommitPhaseSucceeded ||
+		fresh.Status.Phase == devpilotv1alpha1.CommitPhaseFailed {
+		return nil, nil
+	}
+
 	pvcName := source.PVCName
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: commit.Namespace, Name: pvcName}, pvc); err != nil {

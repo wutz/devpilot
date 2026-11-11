@@ -17,77 +17,372 @@ limitations under the License.
 package controller
 
 import (
-	"context"
+	"encoding/json"
+	"fmt"
+
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 )
 
+const (
+	testCommitImage  = "registry.example.com/devpilot-commit:test"
+	testCommitName   = "commit-1"
+	testCommitTag    = "v1"
+	testCommitDigest = "sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888"
+	testSetEnvPair   = "EIN=1"
+)
+
+// newOfflineCommit creates a stopped DevBox with a bound root disk claim plus a
+// commit that targets it. Nothing is running, so the commit takes the offline
+// path; the returned key is the commit to reconcile.
+func newOfflineCommit(namespace, devboxName string) types.NamespacedName {
+	box := newTestDevBox(devboxName, namespace)
+	Expect(k8sClient.Create(ctx, box)).To(Succeed())
+
+	pvcName := devboxName + RootDiskPVCSuffix
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(testVolumeSize)},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+
+	box.Status.Phase = devpilotv1alpha1.PhaseStopped
+	box.Status.RootDiskPVC = pvcName
+	Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+
+	commit := &devpilotv1alpha1.DevBoxCommit{
+		ObjectMeta: metav1.ObjectMeta{Name: testCommitName, Namespace: namespace},
+		Spec: devpilotv1alpha1.DevBoxCommitSpec{
+			DevBoxName: devboxName,
+			Destination: devpilotv1alpha1.CommitDestination{
+				Repository: testCommitRepository,
+				Tags:       []string{testCommitTag},
+			},
+			Compression:       devpilotv1alpha1.CompressionZstd,
+			ExcludePaths:      []string{"tmp/scratch"},
+			CleanPackageCache: true,
+			Changes: devpilotv1alpha1.CommitChanges{
+				Author:  "alice",
+				Comment: testCommitTag,
+				Env:     []devpilotv1alpha1.NameValue{{Name: "EIN", Value: "1"}},
+				Cmd:     []string{"python", "train.py"},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+	return client.ObjectKeyFromObject(commit)
+}
+
+func newCommitReconciler(registrySecret string) *DevBoxCommitReconciler {
+	return &DevBoxCommitReconciler{
+		Client: k8sClient,
+		Scheme: k8sClient.Scheme(),
+		Config: Config{InitImage: testInit, CommitImage: testCommitImage, RegistrySecret: registrySecret},
+	}
+}
+
+func reconcileCommit(r *DevBoxCommitReconciler, key types.NamespacedName) *devpilotv1alpha1.DevBoxCommit {
+	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	Expect(err).NotTo(HaveOccurred())
+	commit := &devpilotv1alpha1.DevBoxCommit{}
+	Expect(k8sClient.Get(ctx, key, commit)).To(Succeed())
+	return commit
+}
+
+// completeBuildJob stands in for the kubelet: it marks the Job succeeded and
+// leaves a pod whose container state carries the termination message.
+func completeBuildJob(job *batchv1.Job, message string) {
+	job.Status.Succeeded = 1
+	Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      job.Name + "-pod",
+			Namespace: job.Namespace,
+			Labels:    map[string]string{batchv1.JobNameLabel: job.Name},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: CommitContainerName, Image: testCommitImage}},
+		},
+	}
+	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: CommitContainerName,
+		State: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: message},
+		},
+	}}
+	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+}
+
+func cleanupOfflineCommit(namespace string) {
+	commit := &devpilotv1alpha1.DevBoxCommit{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: testCommitName}, commit); err == nil {
+		controllerutil.RemoveFinalizer(commit, CommitFinalizer)
+		_ = k8sClient.Update(ctx, commit)
+		_ = k8sClient.Delete(ctx, commit)
+	}
+	_ = k8sClient.DeleteAllOf(ctx, &batchv1.Job{}, client.InNamespace(namespace))
+	_ = k8sClient.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(namespace))
+}
+
 var _ = Describe("DevBoxCommit Controller", func() {
-	Context("When reconciling a resource", func() {
-		const (
-			resourceName      = "test-resource"
-			resourceNamespace = "default"
-		)
-
-		ctx := context.Background()
-
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: resourceNamespace,
-		}
-		devboxcommit := &devpilotv1alpha1.DevBoxCommit{}
+	Context("offline commits", func() {
+		var namespace string
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind DevBoxCommit")
-			err := k8sClient.Get(ctx, typeNamespacedName, devboxcommit)
-			if err != nil && errors.IsNotFound(err) {
-				commitResource := &devpilotv1alpha1.DevBoxCommit{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
-					},
-					Spec: devpilotv1alpha1.DevBoxCommitSpec{
-						DevBoxName: "my-devbox",
-						Destination: devpilotv1alpha1.CommitDestination{
-							Repository: testCommitRepository,
-							Tags:       []string{"v1"},
-						},
-					},
-				}
-				Expect(k8sClient.Create(ctx, commitResource)).To(Succeed())
-			}
+			namespace = fmt.Sprintf("commit-%d", specCounter)
+			specCounter++
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: namespace},
+			})).To(Succeed())
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &devpilotv1alpha1.DevBoxCommit{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Cleanup the specific resource instance DevBoxCommit")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			cleanupOfflineCommit(namespace)
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+			_ = k8sClient.Delete(ctx, ns)
 		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &DevBoxCommitReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+
+		It("starts an isolated build Job for a stopped DevBox", func() {
+			key := newOfflineCommit(namespace, "devbox-offline")
+
+			commit := reconcileCommit(newCommitReconciler(""), key)
+			Expect(commit.Finalizers).To(ContainElement(CommitFinalizer))
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseBuilding))
+			Expect(commit.Status.Mode).To(Equal(devpilotv1alpha1.CommitModeOfflinePVC))
+			Expect(commit.Status.BuildJobName).To(Equal(testCommitName + CommitJobSuffix))
+			Expect(commit.Status.StartTime).NotTo(BeNil())
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			Expect(job.Spec.BackoffLimit).To(HaveValue(BeEquivalentTo(0)))
+
+			container := job.Spec.Template.Spec.Containers[0]
+			Expect(container.Name).To(Equal(CommitContainerName))
+			Expect(container.Image).To(Equal(testCommitImage))
+			Expect(container.Args).To(ContainElements(
+				"--repository="+testCommitRepository,
+				"--tags="+testCommitTag,
+				"--compression=zstd",
+				"--exclude=tmp/scratch",
+				"--clean-package-cache=true",
+				"--author=alice",
+				"--env=EIN=1",
+				`--cmd=["python","train.py"]`,
+			))
+			Expect(container.VolumeMounts).To(ContainElement(HaveField("MountPath", RootDiskMountPath)))
+			for _, mount := range container.VolumeMounts {
+				if mount.MountPath == RootDiskMountPath {
+					Expect(mount.ReadOnly).To(BeTrue(), "the source root disk must be mounted read-only")
+				}
 			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
+			pod := job.Spec.Template.Spec
+			Expect(pod.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
+			Expect(pod.SecurityContext.RunAsNonRoot).To(HaveValue(BeTrue()))
+			Expect(container.SecurityContext.Capabilities.Drop).To(Equal([]corev1.Capability{capabilityAll}))
+			Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
+		})
+
+		It("mounts the registry secret as a docker config", func() {
+			secretName := "registry-creds"
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
+				Type:       corev1.SecretTypeDockerConfigJson,
+				Data: map[string][]byte{
+					corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`),
+				},
+			})).To(Succeed())
+			key := newOfflineCommit(namespace, "devbox-secret")
+
+			reconcileCommit(newCommitReconciler(secretName), key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			container := job.Spec.Template.Spec.Containers[0]
+			Expect(container.Env).To(ContainElement(corev1.EnvVar{Name: "DOCKER_CONFIG", Value: CommitRegistryMount}))
+			Expect(container.VolumeMounts).To(ContainElement(HaveField("MountPath", CommitRegistryMount)))
+		})
+
+		It("records the pushed image when the Job succeeds", func() {
+			key := newOfflineCommit(namespace, "devbox-success")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			image := testCommitRepository + "@" + testCommitDigest
+			message, err := json.Marshal(map[string]any{
+				"baseDigest":     testDigest,
+				"manifestDigest": testCommitDigest,
+				"configDigest":   testCommitDigest,
+				"diffID":         testCommitDigest,
+				"layerSize":      int64(2048),
+				"images":         []string{image},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+			completeBuildJob(job, string(message))
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseSucceeded))
+			Expect(commit.Status.Digest).To(Equal(testCommitDigest))
+			Expect(commit.Status.Images).To(Equal([]string{image}))
+			Expect(commit.Status.LayerSize).To(Equal(int64(2048)))
+			Expect(commit.Status.BaseImageDigest).To(Equal(testDigest))
+			Expect(commit.Status.CompletionTime).NotTo(BeNil())
+			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "Pushed")))
+		})
+
+		It("fails when the build Job reports an error", func() {
+			key := newOfflineCommit(namespace, "devbox-failed")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			completeBuildJob(job, `{"error":"the registry refused the push"}`)
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
+			Expect(commit.Status.Message).To(ContainSubstring("refused"))
+			Expect(commit.Status.Digest).To(BeEmpty())
+		})
+
+		It("fails when the result message is missing", func() {
+			key := newOfflineCommit(namespace, "devbox-nomessage")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			job.Status.Succeeded = 1
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
+			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "ResultMissing")))
+		})
+
+		It("waits instead of starting a build when the message is unreadable", func() {
+			key := newOfflineCommit(namespace, "devbox-garbage")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			completeBuildJob(job, "{not json")
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
+			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "ResultUnreadable")))
+		})
+
+		It("reuses the existing Job instead of starting a second build", func() {
+			key := newOfflineCommit(namespace, "devbox-idempotent")
+			reconciler := newCommitReconciler("")
+			first := reconcileCommit(reconciler, key)
+			second := reconcileCommit(reconciler, key)
+
+			Expect(second.Status.BuildJobName).To(Equal(first.Status.BuildJobName))
+			jobs := &batchv1.JobList{}
+			Expect(k8sClient.List(ctx, jobs, client.InNamespace(namespace))).To(Succeed())
+			Expect(jobs.Items).To(HaveLen(1))
+		})
+
+		It("waits while a pod still holds the root disk", func() {
+			key := newOfflineCommit(namespace, "devbox-running")
+			box := &devpilotv1alpha1.DevBox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: "devbox-running",
+			}, box)).To(Succeed())
+			box.Status.Phase = devpilotv1alpha1.PhaseRunning
+			Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+			Expect(k8sClient.Create(ctx, &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "devbox-running" + PodSuffix, Namespace: namespace},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: MainContainerName, Image: testDevBoxImage}},
+				},
+			})).To(Succeed())
+
+			commit := reconcileCommit(newCommitReconciler(""), key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhasePending))
+			Expect(commit.Status.Message).To(ContainSubstring("terminate"))
+
+			jobs := &batchv1.JobList{}
+			Expect(k8sClient.List(ctx, jobs, client.InNamespace(namespace))).To(Succeed())
+			Expect(jobs.Items).To(BeEmpty())
+		})
+
+		It("fails when no commit image is configured", func() {
+			key := newOfflineCommit(namespace, "devbox-noimage")
+			reconciler := newCommitReconciler("")
+			reconciler.Config.CommitImage = ""
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
+			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "CommitDisabled")))
+		})
+
+		It("fails when the root disk claim is missing", func() {
+			key := newOfflineCommit(namespace, "devbox-nodisk")
+			box := &devpilotv1alpha1.DevBox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: "devbox-nodisk",
+			}, box)).To(Succeed())
+			// Point at a claim that was never created: deleting the real one is
+			// asynchronous in envtest, so it would still be readable here.
+			box.Status.RootDiskPVC = "never-created" + RootDiskPVCSuffix
+			Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+
+			commit := reconcileCommit(newCommitReconciler(""), key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
+			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "RootDiskMissing")))
+		})
+
+		It("releases the build Job on deletion", func() {
+			key := newOfflineCommit(namespace, "devbox-delete")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			commit := &devpilotv1alpha1.DevBoxCommit{}
+			Expect(k8sClient.Get(ctx, key, commit)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, commit)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, key, &devpilotv1alpha1.DevBoxCommit{})
+			Expect(err).To(HaveOccurred())
 		})
 	})
 })

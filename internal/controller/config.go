@@ -30,6 +30,12 @@ type Config struct {
 	// InitImage is the fully qualified reference of the devpilot-init helper
 	// binary image, injected as an init container into every DevBox pod.
 	InitImage string
+	// CommitImage is the fully qualified reference of the devpilot-commit image
+	// that DevBoxCommit build Jobs run. Empty disables commits.
+	CommitImage string
+	// RegistrySecret names a docker config secret in the commit namespace. When
+	// set, a build Job mounts it and pushes with those credentials.
+	RegistrySecret string
 	// DefaultSnapshotClasses maps a root disk StorageClass to the
 	// VolumeSnapshotClass used for online commits.
 	DefaultSnapshotClasses map[string]string

@@ -303,7 +303,7 @@ func initContainer(image string) corev1.Container {
 			AllowPrivilegeEscalation: new(false),
 			ReadOnlyRootFilesystem:   new(true),
 			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
+				Drop: []corev1.Capability{capabilityAll},
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
@@ -335,7 +335,7 @@ func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, env []corev1.En
 					"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
 					"NET_BIND_SERVICE", "SETGID", "SETUID", "SYS_ADMIN", "SYS_CHROOT",
 				},
-				Drop: []corev1.Capability{"ALL"},
+				Drop: []corev1.Capability{capabilityAll},
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{

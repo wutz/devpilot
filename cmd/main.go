@@ -64,6 +64,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var initImage string
+	var commitImage string
+	var registrySecret string
 	var snapshotClassMapping string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -90,6 +92,10 @@ func main() {
 	flag.StringVar(&snapshotClassMapping, "registry-default-snapshot-class", "",
 		"Default VolumeSnapshotClass per root disk StorageClass, formatted as "+
 			"storageClass=snapshotClass[,storageClass=snapshotClass...].")
+	flag.StringVar(&commitImage, "devpilot-commit-image", "",
+		"Fully qualified reference of the devpilot-commit image that DevBoxCommit build Jobs run.")
+	flag.StringVar(&registrySecret, "devpilot-registry-secret", "",
+		"Name of a docker config secret in the build namespace used to push committed images.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -105,6 +111,8 @@ func main() {
 	}
 	operatorConfig := controller.Config{
 		InitImage:              initImage,
+		CommitImage:            commitImage,
+		RegistrySecret:         registrySecret,
 		DefaultSnapshotClasses: snapshotClasses,
 	}
 	if err := operatorConfig.Validate(); err != nil {
@@ -113,6 +121,7 @@ func main() {
 	}
 	setupLog.Info("Loaded operator configuration",
 		"initImage", operatorConfig.InitImage,
+		"commitImage", operatorConfig.CommitImage,
 		"defaultSnapshotClasses", operatorConfig.SnapshotClassMapping())
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled

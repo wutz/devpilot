@@ -27,6 +27,14 @@ import (
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 )
 
+const (
+	// testPinnedDigest is what status.activeImageDigest holds once the root
+	// disk exists.
+	testPinnedDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	// testOtherImage is a base image that differs from the pinned one.
+	testOtherImage = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+)
+
 // newDevBox returns a minimal valid DevBox for the validator tests.
 func newDevBox() *devpilotv1alpha1.DevBox {
 	return &devpilotv1alpha1.DevBox{
@@ -129,15 +137,38 @@ var _ = Describe("DevBox Webhook", func() {
 		})
 
 		It("allows changing the image before the root disk exists", func() {
-			obj.Spec.Image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+			obj.Spec.Image = testOtherImage
 			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("protects the image once a digest is pinned", func() {
 			oldObj.Status.ActiveImage = oldObj.Spec.Image
-			oldObj.Status.ActiveImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-			obj.Spec.Image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+			oldObj.Status.ActiveImageDigest = testPinnedDigest
+			obj.Spec.Image = testOtherImage
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("commit the devbox or reset the root disk"))
+		})
+
+		It("admits the operator's rebase onto the pending image", func() {
+			committed := "registry.example.com/team/my-devbox@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+			oldObj.Status.ActiveImage = oldObj.Spec.Image
+			oldObj.Status.ActiveImageDigest = testPinnedDigest
+			oldObj.Status.PendingRebaseImage = committed
+			obj.Spec.Image = committed
+			obj.Status = oldObj.Status
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("still protects the image during a pending rebase", func() {
+			oldObj.Status.ActiveImageDigest = testPinnedDigest
+			oldObj.Status.PendingRebaseImage = "registry.example.com/team/my-devbox@sha256:2222"
+			obj.Spec.Image = testOtherImage
+			obj.Status = oldObj.Status
 
 			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
 			Expect(err).To(HaveOccurred())
@@ -145,7 +176,7 @@ var _ = Describe("DevBox Webhook", func() {
 		})
 
 		It("allows unrelated edits while the image stays put", func() {
-			oldObj.Status.ActiveImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+			oldObj.Status.ActiveImageDigest = testPinnedDigest
 			obj.Spec.Resources.GPUs = 1
 			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
 			Expect(err).NotTo(HaveOccurred())

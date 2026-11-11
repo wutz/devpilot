@@ -51,6 +51,11 @@ type BootOptions struct {
 	ImageDigest string
 	// Lower is where the initial / is bound read-only.
 	Lower string
+	// Rebase clears the writable state of the previous base image before the
+	// overlay is assembled, so the pod starts on the new digest with an empty
+	// upper layer. The operator only sets it on a stopped DevBox whose commit
+	// was taken offline; anything else would drop writes made after the commit.
+	Rebase bool
 	// GracePeriod bounds the shutdown wait for the managed command.
 	GracePeriod time.Duration
 	// Command is the user process to supervise.
@@ -101,8 +106,13 @@ func Boot(opts BootOptions) (int, error) {
 
 	// The digest invariant is checked before anything is mounted: if this pod
 	// started from a different base image than the one upper/ was created on,
-	// mounting would corrupt every hardlink and .so path inside upper/.
-	meta, err := PinBaseImage(opts.Root, opts.ImageRef, opts.ImageDigest)
+	// mounting would corrupt every hardlink and .so path inside upper/. A rebase
+	// is the sanctioned exception: it discards upper/ and pins the new digest.
+	pin := PinBaseImage
+	if opts.Rebase {
+		pin = RebaseUpper
+	}
+	meta, err := pin(opts.Root, opts.ImageRef, opts.ImageDigest)
 	if err != nil {
 		return 1, err
 	}

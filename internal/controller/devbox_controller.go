@@ -159,7 +159,13 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 		return ctrl.Result{}, err
 	}
 
-	desired, err := r.buildPod(box, pvc, info)
+	// A pending rebase switches the base image and clears upper/ on this start,
+	// so the pod runs devpilot-init with --rebase. The flag is derived from
+	// status on every reconcile, never from spec, so it survives a failed
+	// image pull without ever landing in the spec hash.
+	rebase := box.Status.PendingRebaseImage != ""
+
+	desired, err := r.buildPod(box, pvc, info, rebase)
 	if err != nil {
 		r.setFailed(ctx, box, "PodSpecInvalid", err)
 		return ctrl.Result{}, err
@@ -190,11 +196,11 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 		return ctrl.Result{RequeueAfter: requeueWhileStarting}, nil
 	}
 
-	return r.observePod(ctx, box, pod)
+	return r.observePod(ctx, box, pod, info)
 }
 
 // observePod maps the pod's state into the DevBox phase.
-func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1.DevBox, pod *corev1.Pod) (ctrl.Result, error) {
+func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1.DevBox, pod *corev1.Pod, info ImageInfo) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	box.Status.PodName = pod.Name
@@ -204,6 +210,15 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 
 	switch pod.Status.Phase {
 	case corev1.PodRunning:
+		// devpilot-init cleared upper/ before this container started, so the
+		// root disk now belongs to the committed image. The spec moves to it
+		// in the same reconcile the pin does, so a recycled pod can never run
+		// --rebase twice for the same commit.
+		if box.Status.PendingRebaseImage != "" {
+			if err := r.consumeRebase(ctx, box, info); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if !podReady(pod) {
 			box.Status.Phase = devpilotv1alpha1.PhaseStarting
 			box.Status.StartingStep = devpilotv1alpha1.StartingStepStartingContainers
@@ -237,9 +252,16 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 	return ctrl.Result{RequeueAfter: requeueWhileStarting}, nil
 }
 
-// resolveImage resolves spec.image once and refuses to continue when a tag now
-// moves: the root disk was built on the pinned lower layer.
+// resolveImage resolves the base image once and refuses to continue when a tag
+// now moves: the root disk was built on the pinned lower layer.
+//
+// A pending rebase is the sanctioned way past that: the next start runs on the
+// committed image, clears upper/ and adopts its digest. The pin is not moved
+// here, only once the pod that runs with --rebase is up.
 func (r *DevBoxReconciler) resolveImage(ctx context.Context, box *devpilotv1alpha1.DevBox) (ImageInfo, error) {
+	if pending := box.Status.PendingRebaseImage; pending != "" {
+		return r.Images.Resolve(ctx, pending)
+	}
 	info, err := r.Images.Resolve(ctx, box.Spec.Image)
 	if err != nil {
 		return ImageInfo{}, err
@@ -255,6 +277,27 @@ func (r *DevBoxReconciler) resolveImage(ctx context.Context, box *devpilotv1alph
 			box.Spec.Image, info.Digest, box.Status.ActiveImageDigest)
 	}
 	return info, nil
+}
+
+// consumeRebase adopts the pending image once the pod that ran with --rebase is
+// up. Clearing upper/ is destructive, so it happens exactly once: the pending
+// field and the spec image move together, and the status patch that follows
+// makes the two writes durable in one reconcile.
+func (r *DevBoxReconciler) consumeRebase(ctx context.Context, box *devpilotv1alpha1.DevBox, info ImageInfo) error {
+	pending := box.Status.PendingRebaseImage
+	box.Spec.Image = pending
+	// A spec write bumps the generation, so the old object is the right base
+	// for the merge patch.
+	if err := r.Update(ctx, box); err != nil {
+		return fmt.Errorf("adopt the rebased base image %s: %w", pending, err)
+	}
+	box.Status.ActiveImage = info.ImageRef
+	box.Status.ActiveImageDigest = info.Digest
+	box.Status.RebaseCount++
+	box.Status.PendingRebaseImage = ""
+	logf.FromContext(ctx).Info("Rebased the root disk",
+		"image", info.ImageRef, "digest", info.Digest, "rebaseCount", box.Status.RebaseCount)
+	return nil
 }
 
 // currentPod returns the pod owned by the DevBox, or nil.

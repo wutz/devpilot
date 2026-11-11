@@ -138,6 +138,101 @@ func TestPinBaseImageRepinsEmptyUpper(t *testing.T) {
 	}
 }
 
+func TestClearUpperEmptiesWritableLayers(t *testing.T) {
+	root := newRootDisk(t)
+	for _, dir := range []string{UpperDir, WorkDir, MergedDir} {
+		if err := os.WriteFile(filepath.Join(root, dir, "leftover"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := WriteBaseImageMeta(root, BaseImageMeta{ImageRef: testImageRefA, ImageDigest: testImageDigestA}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClearUpper(root); err != nil {
+		t.Fatalf("ClearUpper() error = %v", err)
+	}
+
+	empty, err := UpperIsEmpty(root)
+	if err != nil || !empty {
+		t.Errorf("UpperIsEmpty() = (%v, %v), want (true, nil)", empty, err)
+	}
+	// work/ and merged/ go with their contents: the next Setup recreates them.
+	for _, dir := range []string{WorkDir, MergedDir} {
+		if _, err := os.Stat(filepath.Join(root, dir)); !os.IsNotExist(err) {
+			t.Errorf("%s/ still exists (err %v), want it removed with its contents", dir, err)
+		}
+	}
+
+	// The pin itself stays put: only a boot decides which image the disk joins.
+	meta, err := ReadBaseImageMeta(root)
+	if err != nil {
+		t.Fatalf("ReadBaseImageMeta() error = %v", err)
+	}
+	if meta.ImageDigest != testImageDigestA {
+		t.Errorf("pin = %q, want it untouched by ClearUpper", meta.ImageDigest)
+	}
+}
+
+// RebaseUpper is the exception to the digest invariant: the whole point of a
+// rebase is that the old upper layer does not belong to the new base image.
+func TestRebaseUpperReplacesALayerOnAnotherImage(t *testing.T) {
+	root := newRootDisk(t)
+	if err := os.WriteFile(filepath.Join(root, UpperDir, "marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteBaseImageMeta(root, BaseImageMeta{
+		ImageRef:    testImageRefA,
+		ImageDigest: testImageDigestA,
+		RebaseCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, err := RebaseUpper(root, testImageRefB, testImageDigestB)
+	if err != nil {
+		t.Fatalf("RebaseUpper() error = %v", err)
+	}
+	if meta.ImageDigest != testImageDigestB || meta.ImageRef != testImageRefB {
+		t.Errorf("RebaseUpper() = %+v, want the new image", meta)
+	}
+	if meta.RebaseCount != 2 {
+		t.Errorf("RebaseCount = %d, want the previous count incremented", meta.RebaseCount)
+	}
+
+	empty, err := UpperIsEmpty(root)
+	if err != nil || !empty {
+		t.Errorf("UpperIsEmpty() = (%v, %v), want (true, nil)", empty, err)
+	}
+
+	// The disk must pass the regular digest check afterwards, or every later
+	// start of the same image would be refused.
+	if _, err := PinBaseImage(root, testImageRefB, testImageDigestB); err != nil {
+		t.Errorf("PinBaseImage() after a rebase error = %v", err)
+	}
+}
+
+func TestRebaseUpperStartsWithNoMeta(t *testing.T) {
+	root := newRootDisk(t)
+	meta, err := RebaseUpper(root, testImageRefA, testImageDigestA)
+	if err != nil {
+		t.Fatalf("RebaseUpper() error = %v", err)
+	}
+	if meta.RebaseCount != 1 {
+		t.Errorf("RebaseCount = %d, want 1 when no pin existed", meta.RebaseCount)
+	}
+}
+
+func TestRebaseUpperRequiresIdentity(t *testing.T) {
+	root := newRootDisk(t)
+	if _, err := RebaseUpper(root, "", testImageDigestA); err == nil {
+		t.Error("RebaseUpper() accepted an empty image reference")
+	}
+	if _, err := RebaseUpper(root, testImageRefA, ""); err == nil {
+		t.Error("RebaseUpper() accepted an empty digest")
+	}
+}
+
 func TestPinBaseImageRequiresIdentity(t *testing.T) {
 	root := t.TempDir()
 	if _, err := PinBaseImage(root, "", testImageDigestA); err == nil {

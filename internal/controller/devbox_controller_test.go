@@ -299,6 +299,116 @@ var _ = Describe("DevBox Controller", func() {
 		Expect(box.Status.Message).To(ContainSubstring("commit it or reset the root disk"))
 	})
 
+	It("starts from the pending image with --rebase", func() {
+		box := newTestDevBox("rebase-start", namespace)
+		key := create(box)
+		_, err := reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+		markClaimBound(types.NamespacedName{Namespace: namespace, Name: box.Name + RootDiskPVCSuffix})
+
+		pending := "registry.example.com/team/my-devbox@" + testCommitDigest
+		resolver.digestByRef = map[string]string{pending: testCommitDigest}
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		box.Status.PendingRebaseImage = pending
+		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name + PodSuffix}, pod)).To(Succeed())
+		main := pod.Spec.Containers[0]
+		Expect(main.Image).To(Equal(pending))
+		Expect(main.Command).To(ContainElements("--image-ref="+pending, "--image-digest="+testCommitDigest, "--rebase"))
+		Expect(main.Env).To(ContainElement(corev1.EnvVar{Name: "DEVPILOT_BASE_IMAGE", Value: pending}))
+
+		By("keeping the pin until the rebase actually ran")
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		Expect(box.Status.PendingRebaseImage).To(Equal(pending))
+		Expect(box.Status.ActiveImageDigest).To(BeEmpty())
+		Expect(box.Spec.Image).To(Equal(testDevBoxImage))
+	})
+
+	It("adopts the rebased image once the pod runs", func() {
+		box := newTestDevBox("rebase-consume", namespace)
+		key := create(box)
+		_, err := reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+		markClaimBound(types.NamespacedName{Namespace: namespace, Name: box.Name + RootDiskPVCSuffix})
+
+		pending := "registry.example.com/team/my-devbox@" + testCommitDigest
+		resolver.digestByRef = map[string]string{pending: testCommitDigest}
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		box.Status.PendingRebaseImage = pending
+		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		podKey := types.NamespacedName{Namespace: namespace, Name: box.Name + PodSuffix}
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+		hash := podHash(pod)
+		// devpilot-init has cleared upper/ by the time the container runs, so
+		// the pod is already Running but not yet ready.
+		pod.Status.Phase = corev1.PodRunning
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		Expect(box.Spec.Image).To(Equal(pending), "the rebase is consumed exactly once")
+		Expect(box.Status.PendingRebaseImage).To(BeEmpty())
+		Expect(box.Status.ActiveImage).To(Equal(pending))
+		Expect(box.Status.ActiveImageDigest).To(Equal(testCommitDigest))
+		Expect(box.Status.RebaseCount).To(Equal(int32(1)))
+		Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseStarting))
+
+		// Adopting the image must not look like a spec change, or the running
+		// pod would be replaced and start a second rebase on a cleared disk.
+		Expect(k8sClient.Get(ctx, podKey, pod)).To(Succeed())
+		Expect(podHash(pod)).To(Equal(hash))
+		Expect(pod.DeletionTimestamp).To(BeNil())
+
+		By("accepting the move through the webhook and staying stable")
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		Expect(box.Status.RebaseCount).To(Equal(int32(1)))
+		Expect(box.Spec.Image).To(Equal(pending))
+	})
+
+	It("replaces a running pod that has not rebased yet", func() {
+		box := newTestDevBox("rebase-replace", namespace)
+		key := create(box)
+		_, err := reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+		markClaimBound(types.NamespacedName{Namespace: namespace, Name: box.Name + RootDiskPVCSuffix})
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		podKey := types.NamespacedName{Namespace: namespace, Name: box.Name + PodSuffix}
+		before := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, podKey, before)).To(Succeed())
+		Expect(before.Spec.Containers[0].Command).NotTo(ContainElement("--rebase"))
+
+		pending := "registry.example.com/team/my-devbox@" + testCommitDigest
+		resolver.digestByRef = map[string]string{pending: testCommitDigest}
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		box.Status.PendingRebaseImage = pending
+		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		after := &corev1.Pod{}
+		err = k8sClient.Get(ctx, podKey, after)
+		Expect(client.IgnoreNotFound(err)).NotTo(HaveOccurred())
+		if err == nil {
+			Expect(podHash(after)).NotTo(Equal(podHash(before)))
+		}
+	})
+
 	It("reports Running when the pod is ready", func() {
 		box := newTestDevBox("running", namespace)
 		key := create(box)

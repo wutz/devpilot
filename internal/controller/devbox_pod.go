@@ -230,7 +230,12 @@ func (r *DevBoxReconciler) rootDiskPVC(box *devpilotv1alpha1.DevBox, name string
 
 // buildPod assembles the pod template. It is a pure function of the spec, the
 // resolved image and the claim name, so the spec hash stays stable.
-func (r *DevBoxReconciler) buildPod(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, info ImageInfo) (*corev1.Pod, error) {
+// buildPod assembles the pod template. It is a pure function of the spec, the
+// resolved image, the claim name and the rebase decision, so the spec hash
+// stays stable. rebase is left out of the hash on purpose: once the rebase is
+// consumed it turns off, and a flag that only matters at start must not make
+// the running pod look outdated.
+func (r *DevBoxReconciler) buildPod(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, info ImageInfo, rebase bool) (*corev1.Pod, error) {
 	limits, requests := containerResources(box.Spec.Resources)
 	shm, err := shmSize(box.Spec.Resources)
 	if err != nil {
@@ -242,7 +247,7 @@ func (r *DevBoxReconciler) buildPod(box *devpilotv1alpha1.DevBox, pvc *corev1.Pe
 	}
 
 	env := append([]corev1.EnvVar{
-		{Name: "DEVPILOT_BASE_IMAGE", Value: box.Spec.Image},
+		{Name: "DEVPILOT_BASE_IMAGE", Value: info.ImageRef},
 		{Name: "DEVPILOT_BASE_IMAGE_DIGEST", Value: info.Digest},
 		{Name: "DEVPILOT_ROOT_DISK", Value: RootDiskMountPath},
 		{Name: "HOME", Value: "/root"},
@@ -274,7 +279,7 @@ func (r *DevBoxReconciler) buildPod(box *devpilotv1alpha1.DevBox, pvc *corev1.Pe
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
 			},
 			InitContainers: []corev1.Container{initContainer(r.Config.InitImage)},
-			Containers:     []corev1.Container{mainContainer(box, info, env, limits, requests, shm)},
+			Containers:     []corev1.Container{mainContainer(box, info, rebase, env, limits, requests, shm)},
 			Volumes:        volumes(box, pvc, shm),
 			NodeSelector:   nodeSelectors(box),
 			Tolerations:    box.Spec.Tolerations,
@@ -314,13 +319,13 @@ func initContainer(image string) corev1.Container {
 
 // mainContainer runs devpilot-init as PID 1, which assembles the overlay and
 // supervises the image's own entrypoint.
-func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, env []corev1.EnvVar, limits, requests corev1.ResourceList, shm *apiresource.Quantity) corev1.Container {
+func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, rebase bool, env []corev1.EnvVar, limits, requests corev1.ResourceList, shm *apiresource.Quantity) corev1.Container {
 	_ = shm // reserved for a future explicit tmpfs mount flag
 	return corev1.Container{
 		Name:            MainContainerName,
-		Image:           box.Spec.Image,
+		Image:           info.ImageRef,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Command:         append([]string{InitBinaryPath}, devBoxCommand(box, info)...),
+		Command:         append([]string{InitBinaryPath}, devBoxCommand(box, info, rebase)...),
 		Env:             env,
 		Resources: corev1.ResourceRequirements{
 			Limits:   limits,
@@ -385,10 +390,16 @@ func isBareShell(argv []string) bool {
 }
 
 // devBoxCommand renders the flags and the user command for devpilot-init.
-func devBoxCommand(box *devpilotv1alpha1.DevBox, info ImageInfo) []string {
+// --rebase clears upper/ before the overlay is assembled, so it must be a flag
+// rather than anything after "--", which is exec'd as the user process.
+func devBoxCommand(box *devpilotv1alpha1.DevBox, info ImageInfo, rebase bool) []string {
 	user := startCommand(box, info)
-	argv := make([]string, 0, 3+len(user))
-	argv = append(argv, "--image-ref="+info.ImageRef, "--image-digest="+info.Digest, "--")
+	argv := make([]string, 0, 4+len(user))
+	argv = append(argv, "--image-ref="+info.ImageRef, "--image-digest="+info.Digest)
+	if rebase {
+		argv = append(argv, "--rebase")
+	}
+	argv = append(argv, "--")
 	return append(argv, user...)
 }
 

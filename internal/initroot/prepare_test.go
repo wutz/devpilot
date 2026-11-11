@@ -200,6 +200,51 @@ func TestBootRefusesDigestMismatch(t *testing.T) {
 	}
 }
 
+// A rebase starts from a different base image than the one the disk was
+// created on, which is exactly what the regular pin refuses.
+func TestBootRebaseClearsThePreviousBaseImage(t *testing.T) {
+	root := newRootDisk(t)
+	if err := os.WriteFile(filepath.Join(root, UpperDir, "marker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteBaseImageMeta(root, BaseImageMeta{
+		ImageRef:    testImageRefB,
+		ImageDigest: testImageDigestB,
+		RebaseCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newBootHarness()
+	opts := h.options(root)
+	opts.Rebase = true
+
+	done := make(chan runResult, 1)
+	go func() {
+		code, err := Boot(opts)
+		done <- runResult{code: code, err: err}
+	}()
+	h.child.exits <- 0
+	if got := waitResult(t, done); got.err != nil {
+		t.Fatalf("Boot() error = %v, want a rebase onto a different image to succeed", got.err)
+	}
+
+	empty, err := UpperIsEmpty(root)
+	if err != nil || !empty {
+		t.Errorf("UpperIsEmpty() = (%v, %v), want (true, nil)", empty, err)
+	}
+	meta, err := ReadBaseImageMeta(root)
+	if err != nil {
+		t.Fatalf("ReadBaseImageMeta() error = %v", err)
+	}
+	if meta.ImageDigest != testImageDigestA {
+		t.Errorf("pinned digest = %q, want the rebased image %q", meta.ImageDigest, testImageDigestA)
+	}
+	if meta.RebaseCount != 2 {
+		t.Errorf("RebaseCount = %d, want 2", meta.RebaseCount)
+	}
+}
+
 func TestBootStopsWhenSetupFails(t *testing.T) {
 	root := newRootDisk(t)
 	h := newBootHarness()

@@ -1,0 +1,22 @@
+apiVersion: devpilot.wutz.dev/v1alpha1
+kind: DevBoxCommit
+metadata:
+  name: commit-pytorch-flashattn-v1
+  namespace: default
+spec:
+  devBoxName: kcs-pytorch-dev
+  destination:
+    repository: devbox/pytorch-flashattn
+    tags:
+      - v1
+      - latest
+  consistency: Sync
+  compression: zstd
+  cleanPackageCache: true
+  excludePaths:
+    - "root/scratch/**"
+  changes:
+    author: "developer@example.com"
+    comment: "Add flash-attn and custom CUDA kernels"
+    workingDir: /root
+  rebaseDevBox: false

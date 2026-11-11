@@ -268,8 +268,14 @@ func (r *DevBoxReconciler) buildPod(box *devpilotv1alpha1.DevBox, pvc *corev1.Pe
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: new(false),
 			EnableServiceLinks:           new(false),
+			// RuntimeDefault rejects pivot_root with EPERM: the profile only
+			// allows it for CAP_SYS_ADMIN holders when no_new_privs is off, and
+			// allowPrivilegeEscalation=false sets no_new_privs. Both devpilot-init
+			// and the user entrypoint share this pod, so the profile is lifted
+			// pod-wide; the containers stay non-privileged, keep ALL capabilities
+			// dropped, and devpilot-init narrows to its explicit add list.
 			SecurityContext: &corev1.PodSecurityContext{
-				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
 			},
 			InitContainers: []corev1.Container{initContainer(r.Config.InitImage)},
 			Containers:     []corev1.Container{mainContainer(box, info, env, limits, requests, shm)},
@@ -328,7 +334,6 @@ func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, env []corev1.En
 			RunAsUser:                new(int64(0)),
 			AllowPrivilegeEscalation: new(false),
 			ReadOnlyRootFilesystem:   new(false),
-			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			Capabilities: &corev1.Capabilities{
 				Add: []corev1.Capability{
 					"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",

@@ -19,6 +19,7 @@ package initroot
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -214,6 +215,34 @@ func TestBootStopsWhenSetupFails(t *testing.T) {
 	}
 	if !h.snapshot.closed {
 		t.Error("snapshot handle leaked after a setup failure")
+	}
+}
+
+// A fresh PVC has no upper/ or .meta/ yet. The snapshot is opened before Setup
+// runs, so Boot must create the layout itself; otherwise the very first start
+// of every DevBox fails with "open upper dir: no such file or directory".
+func TestBootCreatesLayoutBeforeOpeningSnapshot(t *testing.T) {
+	root := t.TempDir()
+	h := newBootHarness()
+	opts := h.options(root)
+	opts.OpenSnapshot = func(path string) (OpaqueFlusher, error) {
+		for _, dir := range []string{UpperDir, WorkDir, MergedDir, MetaDir} {
+			if _, err := os.Stat(filepath.Join(path, dir)); err != nil {
+				return nil, err
+			}
+		}
+		return h.snapshot, nil
+	}
+
+	done := make(chan runResult, 1)
+	go func() {
+		code, err := Boot(opts)
+		done <- runResult{code: code, err: err}
+	}()
+	h.child.exits <- 0
+
+	if got := waitResult(t, done); got.err != nil {
+		t.Fatalf("Boot() error = %v, want the layout to exist before the snapshot", got.err)
 	}
 }
 

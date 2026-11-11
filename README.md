@@ -7,7 +7,7 @@ DevPilot 聚焦解决 K8s 容器开发机的两大核心工程问题：
 1. **关机后全系统修改持久化与跨节点自由调度**：通过块存储 PVC（Ceph RBD / VAST Block）持久化内核态 OverlayFS `upperdir`，由静态注入的 `devpilot-init` 完成切根与子挂载迁移。用户通过 `apt`、`conda`、`pip`、源码编译写入 `/usr`、`/etc`、`/opt`、`/root` 的任意变更及文件删除记录（whiteout）在关机或抢占驱逐后完整保留，开机时可调度至任意空闲 GPU 节点秒级恢复。
 2. **零宿主机耦合的流式固化镜像（Commit & Push）**：无需挂载宿主机 `containerd.sock`、无需在构建节点拉取几十 GB 基础 CUDA 镜像，`devpilot-commit` 将持久化 `upperdir`（支持停机离线提交与基于 CSI `VolumeSnapshot` 的在线热提交）流式转换为标准 OCI 增量层，直接追加到远端镜像仓库（Harbor / GHCR）的基础镜像 Manifest 上。
 
-> 状态：M1 编码中。`devpilot-init` 与 `DevBoxReconciler` 的核心开机/关机全盘持久化逻辑已实现并通过 envtest，待 `bz1-dev1` 实测验证。
+> 状态：M1 已完成。`devpilot-init` 与 `DevBoxReconciler` 的核心开机/关机全盘持久化逻辑已通过 envtest，并在 `bz1-dev1` 上完成跨 GPU 节点实测（`apt`/`pip` 安装、文件删除与 CUDA 全部跨节点保留）。M2（`devpilot-commit` 流式镜像固化）编码中。
 
 ## 核心架构
 

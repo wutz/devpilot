@@ -324,7 +324,7 @@ func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, env []corev1.En
 		Name:            MainContainerName,
 		Image:           box.Spec.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Command:         append([]string{InitBinaryPath}, devBoxCommand(info)...),
+		Command:         append([]string{InitBinaryPath}, devBoxCommand(box, info)...),
 		Env:             env,
 		Resources: corev1.ResourceRequirements{
 			Limits:   limits,
@@ -350,22 +350,46 @@ func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, env []corev1.En
 	}
 }
 
-// devBoxCommand renders the flags and the user command for devpilot-init.
-// Flags must precede "--"; everything after it is exec'd as the user process.
-func devBoxCommand(info ImageInfo) []string {
-	argv := []string{
-		"--image-ref=" + info.ImageRef,
-		"--image-digest=" + info.Digest,
-		"--",
+// shellNames are the interpreters that exit immediately without a TTY: with
+// stdin on /dev/null the shell reads EOF and quits, which turns a pod meant to
+// host an interactive session into a Finished one.
+var shellNames = map[string]struct{}{
+	"bash": {}, "dash": {}, "ash": {}, "sh": {}, "zsh": {}, "fish": {},
+}
+
+// startCommand resolves the process devpilot-init should supervise. An explicit
+// spec.command wins; otherwise the image's own ENTRYPOINT/CMD is inherited,
+// unless that only opens a shell which would exit at once. Flags must precede
+// "--"; everything after it is exec'd as the user process.
+func startCommand(box *devpilotv1alpha1.DevBox, info ImageInfo) []string {
+	if len(box.Spec.Command) > 0 {
+		return append(append([]string{}, box.Spec.Command...), box.Spec.Args...)
 	}
-	argv = append(argv, info.Entrypoint...)
-	argv = append(argv, info.Cmd...)
-	if len(argv) == 3 {
-		// The image has no long running command of its own: keep the
-		// container alive so the user can attach, as documented.
-		argv = append(argv, "sleep", "infinity")
+	argv := append(append([]string{}, info.Entrypoint...), info.Cmd...)
+	if len(argv) == 0 || isBareShell(argv) {
+		// Keep the container alive so the user can attach, as documented. A
+		// shell is reachable through the session, not through PID 1's stdin.
+		return []string{"sleep", "infinity"}
 	}
 	return argv
+}
+
+// isBareShell reports whether the resolved command ends in an interpreter, with
+// no script or flag that would keep it busy. An image entrypoint that only
+// exec's "$@" (the NVIDIA images do) leaves the CMD's shell as the real process,
+// so the last argument decides.
+func isBareShell(argv []string) bool {
+	last := argv[len(argv)-1]
+	_, bare := shellNames[last[strings.LastIndex(last, "/")+1:]]
+	return bare
+}
+
+// devBoxCommand renders the flags and the user command for devpilot-init.
+func devBoxCommand(box *devpilotv1alpha1.DevBox, info ImageInfo) []string {
+	user := startCommand(box, info)
+	argv := make([]string, 0, 3+len(user))
+	argv = append(argv, "--image-ref="+info.ImageRef, "--image-digest="+info.Digest, "--")
+	return append(argv, user...)
 }
 
 // volumes lists the pod volumes: the helper binary, the root disk and shared

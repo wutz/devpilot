@@ -232,6 +232,9 @@ var _ = Describe("DevBoxCommit Controller", func() {
 			Expect(pod.SecurityContext.RunAsNonRoot).To(HaveValue(BeFalse()))
 			Expect(pod.SecurityContext.RunAsUser).To(HaveValue(BeEquivalentTo(0)))
 			Expect(container.SecurityContext.Capabilities.Drop).To(Equal([]corev1.Capability{capabilityAll}))
+			// Dropping every capability also denies root the read bypass the
+			// scan needs for private directories such as apt's 0700 lists/.
+			Expect(container.SecurityContext.Capabilities.Add).To(Equal([]corev1.Capability{capabilityDACReadSearch}))
 			Expect(container.SecurityContext.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
 		})
 

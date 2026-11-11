@@ -28,9 +28,14 @@
   - [x] rootdisk PVC 创建与在线扩容同步
   - [x] `Pending` → `Starting` → `Running` ↔ `Stopping` → `Stopped` 状态机
   - [x] 快捷注解（`stop` / `start` / `restart` / `reset-rootdisk`）与 ValidatingWebhook 校验
-- [ ] 验证（`bz1-dev1` 实测）：
-  - [ ] 在 GPU 节点 A 创建 PyTorch 开发机，执行 `apt-get install -y tmux htop`、`pip install einops`、删除底层某预置文件，校验 `torch.cuda.is_available() == True`
-  - [ ] 关机确认 Pod 销毁、GPU 释放，指定调度至另一台 GPU 节点 B 重新启动，验证 `tmux`、`einops`、文件删除状态以及 `torch.cuda.is_available()` 全部完好
+- [x] 验证（`bz1-dev1` 实测）：
+  - [x] 在 GPU 节点 A 创建 PyTorch 开发机，执行 `apt-get install -y tmux htop`、`pip install einops`、删除底层某预置文件，校验 `torch.cuda.is_available() == True`
+  - [x] 关机确认 Pod 销毁、GPU 释放，指定调度至另一台 GPU 节点 B 重新启动，验证 `tmux`、`einops`、文件删除状态以及 `torch.cuda.is_available()` 全部完好
+
+> 实测记录（2026-11-11，`nvcr.io/nvidia/pytorch:25.08-py3`，`block-nvme` 50Gi root disk）：
+> - `gn-10-243-145-105` → `gn-10-243-145-106` 跨节点重启后，`tmux`/`htop` 的 `dpkg` 记录、`einops 0.8.1`、被删除的 `/opt/nvidia/entrypoint.d/12-banner.sh`（whiteout 生效）与 `torch.cuda.is_available() == True`（RTX 5090）全部保持；
+> - 关机后 Pod 立即销毁、GPU 释放、root disk PVC 保留；
+> - 实测同时暴露并修复了四个环境相关问题：新 PVC 上 `upper/` 尚未创建即被打开、`RuntimeDefault` seccomp 拒绝 `pivot_root`、`CMD=None` 的入口脚本导致 PID 1 立即退出、动作注解按文本去重导致第二次同名动作被丢弃。
 
 ---
 

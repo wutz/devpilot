@@ -265,7 +265,7 @@ var _ = Describe("DevBox Controller", func() {
 		Expect(main.SecurityContext).NotTo(BeNil())
 		Expect(main.SecurityContext.Privileged).To(BeNil())
 		Expect(*main.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
-		Expect(main.SecurityContext.Capabilities.Drop).To(ConsistOf(corev1.Capability("ALL")))
+		Expect(main.SecurityContext.Capabilities.Drop).To(ConsistOf(capabilityAll))
 		// SYS_ADMIN is only needed while the overlay is mounted; devpilot-init
 		// drops it from the bounding set once the root disk is in place.
 		Expect(main.SecurityContext.Capabilities.Add).To(ConsistOf(

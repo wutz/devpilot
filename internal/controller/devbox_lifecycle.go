@@ -85,6 +85,9 @@ const (
 	ConditionRootDiskReady = "RootDiskReady"
 
 	requeueWhileStarting = 5 * time.Second
+
+	// capabilityAll is the capability set that drops every Linux capability.
+	capabilityAll corev1.Capability = "ALL"
 )
 
 // action is a parsed devpilot.wutz.dev/action value.

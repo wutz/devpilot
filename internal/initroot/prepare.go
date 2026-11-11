@@ -111,6 +111,13 @@ func Boot(opts BootOptions) (int, error) {
 	}
 	opts.logf("Pinned base image", "imageRef", meta.ImageRef, "imageDigest", meta.ImageDigest, "rebaseCount", meta.RebaseCount)
 
+	// The layout has to exist before the snapshot: a fresh root disk has no
+	// upper/ or .meta/ yet, and both are opened before any mount happens.
+	// Setup creates the same tree again, which is harmless for MkdirAll.
+	if err := EnsureLayout(opts.Root); err != nil {
+		return 1, err
+	}
+
 	generation, err := nextGeneration(opts.Root)
 	if err != nil {
 		return 1, err

@@ -231,6 +231,53 @@ var _ = Describe("DevBox Controller", func() {
 		Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseStarting))
 	})
 
+	// pivot_root is denied with EPERM under RuntimeDefault: the profile only
+	// allows it for CAP_SYS_ADMIN holders while no_new_privs is off, and
+	// allowPrivilegeEscalation=false sets no_new_privs. Losing that assertion
+	// would only surface on a real cluster, as a DevBox stuck in Starting.
+	It("lifts the seccomp profile pod-wide and keeps capabilities minimal", func() {
+		box := newTestDevBox("seccomp", namespace)
+		key := create(box)
+		_, err := reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+		markClaimBound(types.NamespacedName{Namespace: namespace, Name: box.Name + RootDiskPVCSuffix})
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name + PodSuffix}, pod)).To(Succeed())
+
+		By("setting the profile at pod level")
+		Expect(pod.Spec.SecurityContext).NotTo(BeNil())
+		Expect(pod.Spec.SecurityContext.SeccompProfile).NotTo(BeNil())
+		Expect(pod.Spec.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeUnconfined))
+
+		By("never overriding it per container")
+		for _, container := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+			if container.SecurityContext != nil {
+				Expect(container.SecurityContext.SeccompProfile).To(BeNil())
+			}
+		}
+
+		By("keeping the compensating capability restrictions")
+		Expect(*pod.Spec.AutomountServiceAccountToken).To(BeFalse())
+		main := pod.Spec.Containers[0]
+		Expect(main.SecurityContext).NotTo(BeNil())
+		Expect(main.SecurityContext.Privileged).To(BeNil())
+		Expect(*main.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
+		Expect(main.SecurityContext.Capabilities.Drop).To(ConsistOf(corev1.Capability("ALL")))
+		// SYS_ADMIN is only needed while the overlay is mounted; devpilot-init
+		// drops it from the bounding set once the root disk is in place.
+		Expect(main.SecurityContext.Capabilities.Add).To(ConsistOf(
+			corev1.Capability("CHOWN"), corev1.Capability("DAC_OVERRIDE"),
+			corev1.Capability("FOWNER"), corev1.Capability("FSETID"),
+			corev1.Capability("KILL"), corev1.Capability("MKNOD"),
+			corev1.Capability("NET_BIND_SERVICE"), corev1.Capability("SETGID"),
+			corev1.Capability("SETUID"), corev1.Capability("SYS_ADMIN"),
+			corev1.Capability("SYS_CHROOT"),
+		))
+	})
+
 	It("refuses to mount the root disk over a base image that moved", func() {
 		box := newTestDevBox("moved", namespace)
 		key := create(box)

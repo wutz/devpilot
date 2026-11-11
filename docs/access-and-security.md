@@ -72,7 +72,7 @@ DevBox Pod 内 JupyterLab / TensorBoard / Web 服务
 | `capabilities.drop` | `["ALL"]` | 先清空默认能力集 |
 | `capabilities.add` | 常规标准集（`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `SETGID`, `SETUID`, `NET_BIND_SERVICE`）+ 启动切根所需的 `SYS_ADMIN`, `SYS_CHROOT`, `MKNOD` | 支持 `overlay` 挂载、`pivot_root` 与 `apt`/`dpkg` 包解包管理 |
 | **切根后能力裁剪（Bounding Set Drop）** | **`devpilot-init` 在完成 `pivot_root` 后，拉起 `sshd` 和用户进程前主动通过 `prctl(PR_CAPBSET_DROP)` 移除 `CAP_SYS_ADMIN`！** | **核心安全加固**：用户交互会话及所有子进程（即使 UID=0）的 Capability Bounding Set 中已无 `CAP_SYS_ADMIN`，用户在容器内既不能卸载根盘、也不能手工挂载新文件系统或触发 `CAP_SYS_ADMIN` 相关内核攻击面，而 `apt install`、`conda`、CUDA 训练完全不受影响！ |
-| `seccompProfile` | `RuntimeDefault`（或平台增强 Profile） | 拦截 `kexec_load`、`open_by_handle_at`、`bpf`、`perf_event_open`、`userfaultfd` 等高危内核系统调用 |
+| `seccompProfile` | **`Unconfined`（DevBox Pod 级别，显式记录的有意例外）** | 必须如此：`RuntimeDefault` 只在「持有 `CAP_SYS_ADMIN` 且未设置 `no_new_privs`」时才放行 `pivot_root`，而 `allowPrivilegeEscalation: false` 恰好设置了 `no_new_privs`，因此 `pivot_root` 会被 seccomp 以 `EPERM` 拒绝（`bz1-dev1` containerd 2.0.5 实测确认）。安全由 Capability 收口承担：`privileged: false`、`drop: ["ALL"]`、`allowPrivilegeEscalation: false`、切根后立即 `PR_CAPBSET_DROP` 移除 `CAP_SYS_ADMIN`。`DevBoxCommit` 构建 Job 不执行 `pivot_root`，仍保持 `RuntimeDefault` |
 | `automountServiceAccountToken` | **`false`** | 开发机容器内部无需调用 K8s API Server，彻底阻断容器内窃取 ServiceAccount Token 横向渗透命名空间的途径 |
 
 > **演进备选（K8s User Namespaces + `userxattr`）**：在 K8s 全面启用 `UserNamespacesSupport`（Linux 内核 >= 5.11 支持 OverlayFS `userxattr` 挂载选项）的环境中，容器内 `root (UID 0)` 将映射为宿主机非特权高段 UID，届时甚至连容器初始启动瞬间的宿主级 `CAP_SYS_ADMIN` 都无需授予。当前「切根后立即从 Bounding Set 永久剥离 `CAP_SYS_ADMIN`」方案在现有 K8s 1.32 + NVIDIA RuntimeClass 生产环境下兼容性最好（当前 `nvidia-container-toolkit` 对 User Namespace 映射仍在演进完善中）且安全性极高。

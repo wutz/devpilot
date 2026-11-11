@@ -52,8 +52,11 @@ func run(args []string, stderr *os.File) int {
 		imageRef    string
 		imageDigest string
 		lower       string
+		installPath string
 		gracePeriod time.Duration
 	)
+	fs.StringVar(&installPath, "install", "",
+		"Copy this binary to the given path and exit; used by the init container that populates the shared volume.")
 	fs.StringVar(&root, "root", initroot.DefaultRootDisk,
 		"Mount point of the root disk PVC that holds upper/, work/ and merged/.")
 	fs.StringVar(&imageRef, "image-ref", os.Getenv("DEVPILOT_BASE_IMAGE"),
@@ -66,6 +69,17 @@ func run(args []string, stderr *os.File) int {
 		"How long the managed command gets to exit after SIGTERM before its process group is killed.")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+
+	// The init container only stages the helper into the shared emptyDir; it
+	// never assembles a root and exits as soon as the copy is in place.
+	if installPath != "" {
+		if err := initroot.Install(installPath); err != nil {
+			logf("Could not install devpilot-init", "err", err.Error())
+			return 1
+		}
+		logf("Installed devpilot-init", "path", installPath)
+		return 0
 	}
 
 	argv := fs.Args()

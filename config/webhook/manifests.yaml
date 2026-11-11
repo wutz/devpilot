@@ -1,0 +1,52 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-devpilot-wutz-dev-v1alpha1-devbox
+  failurePolicy: Fail
+  name: mdevbox-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - devpilot.wutz.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - devboxes
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-devpilot-wutz-dev-v1alpha1-devbox
+  failurePolicy: Fail
+  name: vdevbox-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - devpilot.wutz.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - devboxes
+  sideEffects: None

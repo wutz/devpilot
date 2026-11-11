@@ -9,7 +9,7 @@
 - [x] 完成方案选型对比：确立「块存储 PVC 持久化 OverlayFS `upperdir` + 非特权流式 OCI 层追加」路线
 - [x] 核实目标集群 `bz1-dev1` 基础能力：K8s `v1.32.5`、Linux `5.15.0`、`containerd 2.0.5`、`RuntimeClass: nvidia`、块存储 `block-nvme` / `block-vast-cs` 及 CSI `VolumeSnapshotClass`（`csi-rbdplugin-snapclass` / `vast-snapshot-cs`），确认 `ImageVolume` 未启用
 - [x] 输出架构总览、切根与镜像固化机制深潜、`DevBox` / `DevBoxCommit` CRD 规范、安全与接入设计文档
-- [ ] 设计评审确认，进入 M1 编码阶段
+- [x] 设计评审确认，进入 M1 编码阶段
 
 ---
 
@@ -24,10 +24,10 @@
   - [x] `/proc/self/mountinfo` 扫描排序与 `MS_BIND|MS_REC` 子挂载迁移（重点覆盖 `/dev/nvidia*`、`libcuda.so.*`、`nvidia-smi`、`/dev/shm`、共享存储 PVC）
   - [x] `pivot_root` + 懒卸载旧根 + `PR_CAPBSET_DROP` 永久剥离业务子进程的 `CAP_SYS_ADMIN`
   - [x] PID 1 信号转发、僵尸进程回收与 `SIGTERM` 退出前 `sync()` + `.meta/opaque-dirs.json` 刷新
-- [ ] 实现 `DevBoxReconciler` 核心生命周期：
-  - [ ] rootdisk PVC 创建与在线扩容同步
-  - [ ] `Pending` → `Starting` → `Running` ↔ `Stopping` → `Stopped` 状态机
-  - [ ] 快捷注解（`stop` / `start` / `restart` / `reset-rootdisk`）与 ValidatingWebhook 校验
+- [x] 实现 `DevBoxReconciler` 核心生命周期：
+  - [x] rootdisk PVC 创建与在线扩容同步
+  - [x] `Pending` → `Starting` → `Running` ↔ `Stopping` → `Stopped` 状态机
+  - [x] 快捷注解（`stop` / `start` / `restart` / `reset-rootdisk`）与 ValidatingWebhook 校验
 - [ ] 验证（`bz1-dev1` 实测）：
   - [ ] 在 GPU 节点 A 创建 PyTorch 开发机，执行 `apt-get install -y tmux htop`、`pip install einops`、删除底层某预置文件，校验 `torch.cuda.is_available() == True`
   - [ ] 关机确认 Pod 销毁、GPU 释放，指定调度至另一台 GPU 节点 B 重新启动，验证 `tmux`、`einops`、文件删除状态以及 `torch.cuda.is_available()` 全部完好

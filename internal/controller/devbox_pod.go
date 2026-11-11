@@ -359,14 +359,18 @@ var shellNames = map[string]struct{}{
 
 // startCommand resolves the process devpilot-init should supervise. An explicit
 // spec.command wins; otherwise the image's own ENTRYPOINT/CMD is inherited,
-// unless that only opens a shell which would exit at once. Flags must precede
-// "--"; everything after it is exec'd as the user process.
+// unless that only opens a shell or the image declares no CMD at all. A
+// CMD-less image has no command of its own: nvcr.io/nvidia/pytorch sets
+// ENTRYPOINT=/opt/nvidia/nvidia_entrypoint.sh with Cmd=None, and that wrapper
+// prints its banner and exec's an empty argument list, so the pod would exit at
+// once. An image whose ENTRYPOINT alone is the server needs spec.command.
+// Flags must precede "--"; everything after it is exec'd as the user process.
 func startCommand(box *devpilotv1alpha1.DevBox, info ImageInfo) []string {
 	if len(box.Spec.Command) > 0 {
 		return append(append([]string{}, box.Spec.Command...), box.Spec.Args...)
 	}
 	argv := append(append([]string{}, info.Entrypoint...), info.Cmd...)
-	if len(argv) == 0 || isBareShell(argv) {
+	if len(info.Cmd) == 0 || isBareShell(argv) {
 		// Keep the container alive so the user can attach, as documented. A
 		// shell is reachable through the session, not through PID 1's stdin.
 		return []string{"sleep", "infinity"}

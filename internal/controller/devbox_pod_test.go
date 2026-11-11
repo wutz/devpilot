@@ -27,6 +27,7 @@ const (
 	testSleep    = "sleep"
 	testInfinity = "infinity"
 	testPython   = "python"
+	testNvidiaEP = "/opt/nvidia/nvidia_entrypoint.sh"
 )
 
 // A shell as the image command is the common case for dev images, and it exits
@@ -47,7 +48,14 @@ func TestStartCommand(t *testing.T) {
 		},
 		{
 			name:     "bare bash in the image command falls back to sleep",
-			info:     ImageInfo{Entrypoint: []string{"/opt/nvidia/nvidia_entrypoint.sh"}, Cmd: []string{testShell}},
+			info:     ImageInfo{Entrypoint: []string{testNvidiaEP}, Cmd: []string{testShell}},
+			expected: []string{testSleep, testInfinity},
+		},
+		{
+			// nvcr.io/nvidia/pytorch:25.08-py3 is exactly this: the wrapper
+			// exec's an empty argument list and the pod exits at once.
+			name:     "an entrypoint without a CMD falls back to sleep",
+			info:     ImageInfo{Entrypoint: []string{testNvidiaEP}},
 			expected: []string{testSleep, testInfinity},
 		},
 		{

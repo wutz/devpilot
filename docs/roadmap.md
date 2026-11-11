@@ -43,14 +43,14 @@
 
 目标：跑通「开发机不停机或停机状态下，一键将容器修改秒级打包追加为新 OCI 镜像并推送至 Harbor，新镜像可直接用于新开发机或 `TrainPilot` 训练任务」。
 
-- [ ] 实现 `cmd/devpilot-commit` 流式构建引擎：
-  - [ ] OverlayFS `upper/` 扫描器：字符设备 `0:0` → `.wh.<name>` 转换、`.meta/opaque-dirs.json` / `opaque` xattr → `.wh..wh..opq` 转换、硬链接去重保留
-  - [ ] 默认排除规则（`/tmp`、APT/Pip 缓存、SSH HostKey、受管 `authorized_keys`）与自定义 `excludePaths`
-  - [ ] 基于 `go-containerregistry` 远端读取基础镜像 Manifest/Config，流式压缩（`zstd` / `gzip`）上传增量层并推送新 Manifest（零基础层下载）
-  - [ ] 支持 `spec.changes`（`ENV` / `WORKDIR` / `CMD` / `Author` / `Comment`）元数据合成
-- [ ] 实现 `DevBoxCommitReconciler`：
-  - [ ] 离线路径（`DevBox` 为 `Stopped`/`Interrupted`）：直接只读挂载 rootdisk PVC 启动隔离构建 Job
-  - [ ] 在线热路径（`DevBox` 为 `Running`）：触发容器 `sync`/`fsfreeze` → 创建 CSI `VolumeSnapshot` → 克隆临时只读 PVC → 启动构建 Job → Finalizer 自动清理临时 PVC 与快照
+- [x] 实现 `cmd/devpilot-commit` 流式构建引擎：
+  - [x] OverlayFS `upper/` 扫描器：字符设备 `0:0` → `.wh.<name>` 转换、`.meta/opaque-dirs.json` / `opaque` xattr → `.wh..wh..opq` 转换、硬链接去重保留
+  - [x] 默认排除规则（`/tmp`、APT/Pip 缓存、SSH HostKey、受管 `authorized_keys`）与自定义 `excludePaths`
+  - [x] 基于 `go-containerregistry` 远端读取基础镜像 Manifest/Config，流式压缩（`zstd` / `gzip`）上传增量层并推送新 Manifest（零基础层下载）
+  - [x] 支持 `spec.changes`（`ENV` / `WORKDIR` / `CMD` / `Author` / `Comment`）元数据合成
+- [x] 实现 `DevBoxCommitReconciler`：
+  - [x] 离线路径（`DevBox` 为 `Stopped`/`Interrupted`）：直接只读挂载 rootdisk PVC 启动隔离构建 Job
+  - [x] 在线热路径（`DevBox` 为 `Running`）：触发容器 `sync`/`fsfreeze` → 创建 CSI `VolumeSnapshot` → 克隆临时只读 PVC → 启动构建 Job → Finalizer 自动清理临时 PVC 与快照
   - [ ] 实现 `spec.rebaseDevBox: true`：提交成功后写入 `pendingRebaseImage`，下次重启自动切换底座并清空 `upper/`
 - [ ] 验证（`bz1-dev1` 实测）：
   - [ ] 运行中开发机安装新依赖并触发 `DevBoxCommit`（`csi-rbdplugin-snapclass`），确认 GPU 进程无中断、新镜像成功推送到 Harbor、临时快照自动清理

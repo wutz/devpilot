@@ -25,6 +25,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -50,6 +51,8 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(devpilotv1alpha1.AddToScheme(scheme))
+	// VolumeSnapshot is the only external type the commit controller writes.
+	utilruntime.Must(snapshotv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -225,9 +228,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.DevBoxCommitReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: operatorConfig,
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Config:  operatorConfig,
+		Flusher: &controller.ExecFlusher{Config: mgr.GetConfig()},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "devboxcommit")
 		os.Exit(1)

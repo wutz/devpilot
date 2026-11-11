@@ -54,6 +54,7 @@ func run(args []string, stderr *os.File) int {
 		lower       string
 		installPath string
 		gracePeriod time.Duration
+		flush       bool
 	)
 	fs.StringVar(&installPath, "install", "",
 		"Copy this binary to the given path and exit; used by the init container that populates the shared volume.")
@@ -67,8 +68,23 @@ func run(args []string, stderr *os.File) int {
 		"Path the container's initial / is bound to read-only and used as lowerdir.")
 	fs.DurationVar(&gracePeriod, "grace-period", 30*time.Second,
 		"How long the managed command gets to exit after SIGTERM before its process group is killed.")
+	fs.BoolVar(&flush, "flush", false,
+		"Flush the root filesystem and exit; used by the operator before taking an online commit snapshot.")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+
+	// An online commit snapshots the root disk while the pod keeps running, so
+	// the writes still in the page cache have to reach the block device first.
+	// This runs as a second invocation of the same binary: /proc/1/exe is the
+	// only stable path to it after pivot_root.
+	if flush {
+		if err := initroot.Sync(); err != nil {
+			logf("Could not flush the root filesystem", "err", err.Error())
+			return 1
+		}
+		logf("Flushed the root filesystem")
+		return 0
 	}
 
 	// The init container only stages the helper into the shared emptyDir; it

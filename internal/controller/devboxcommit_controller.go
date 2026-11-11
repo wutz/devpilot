@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,6 +47,9 @@ type DevBoxCommitReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Config Config
+	// Flusher pushes a running DevBox's page cache to its root disk before an
+	// online snapshot. Nil means no flush; production wires the exec one.
+	Flusher RootDiskFlusher
 }
 
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxcommits,verbs=get;list;watch;create;update;patch;delete
@@ -55,7 +59,9 @@ type DevBoxCommitReconciler struct {
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 const (
@@ -163,13 +169,13 @@ func (r *DevBoxCommitReconciler) reconcileCommit(ctx context.Context, commit *de
 		return ctrl.Result{RequeueAfter: requeueWhileCommitting}, nil
 	}
 
-	job, waiting := r.buildJobFor(ctx, commit, box)
+	job, source, waiting := r.buildJobFor(ctx, commit, box)
 	if waiting {
-		return ctrl.Result{RequeueAfter: requeueWhileCommitting}, nil
+		return ctrl.Result{RequeueAfter: requeueWhileSnapshotting}, nil
 	}
 	if job == nil {
 		var err error
-		if job, err = r.ensureBuildJob(ctx, commit, box); err != nil {
+		if job, err = r.ensureBuildJob(ctx, commit, box, source); err != nil {
 			return ctrl.Result{}, err
 		}
 		if job == nil {
@@ -182,59 +188,48 @@ func (r *DevBoxCommitReconciler) reconcileCommit(ctx context.Context, commit *de
 	return r.observeBuildJob(ctx, commit, job)
 }
 
-// buildJobFor reports the commit's existing build Job. The second result is set
-// when the source path is not available yet, in which case the caller only
-// waits: the root disk must not be read while a pod still has it open.
+// buildJobFor reports the commit's existing build Job plus the volume it reads.
+// The second result is set when the source is not available yet, in which case
+// the caller only waits.
 func (r *DevBoxCommitReconciler) buildJobFor(
 	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, box *devpilotv1alpha1.DevBox,
-) (*batchv1.Job, bool) {
+) (*batchv1.Job, commitSource, bool) {
 	log := logf.FromContext(ctx)
+
+	source, waiting, err := r.resolveSource(ctx, commit, box)
+	if err != nil {
+		log.Error(err, "Could not prepare the commit source", "commit", commit.Name)
+		return nil, commitSource{}, true
+	}
+	if waiting {
+		return nil, commitSource{}, true
+	}
 
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: commit.Namespace, Name: buildJobName(commit)}, job); err == nil {
-		return job, false
+		return job, source, false
 	} else if !isNotFound(err) {
 		log.Error(err, "Could not read the commit build Job", "commit", commit.Name)
-		return nil, true
+		return nil, commitSource{}, true
 	}
-
-	// The offline path reads the root disk directly, which is only safe once no
-	// pod holds it. The online snapshot path is a later increment, so a running
-	// DevBox is waited on rather than snapshotted.
-	pod := &corev1.Pod{}
-	podKey := types.NamespacedName{Namespace: box.Namespace, Name: box.Name + PodSuffix}
-	switch err := r.Get(ctx, podKey, pod); {
-	case err == nil:
-		commit.Status.Phase = devpilotv1alpha1.CommitPhasePending
-		commit.Status.Message = fmt.Sprintf("Waiting for the pod of %s to terminate before reading its root disk", box.Name)
-		return nil, true
-	case !isNotFound(err):
-		log.Error(err, "Could not read the DevBox pod", "devbox", box.Name)
-		return nil, true
-	}
-
-	commit.Status.Mode = devpilotv1alpha1.CommitModeOfflinePVC
-	return nil, false
+	return nil, source, false
 }
 
-// ensureBuildJob creates the isolated build Job for an offline commit.
+// ensureBuildJob creates the isolated build Job that reads the resolved source.
 func (r *DevBoxCommitReconciler) ensureBuildJob(
-	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, box *devpilotv1alpha1.DevBox,
+	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, box *devpilotv1alpha1.DevBox, source commitSource,
 ) (*batchv1.Job, error) {
-	pvcName := box.Status.RootDiskPVC
-	if pvcName == "" {
-		pvcName = box.Name + RootDiskPVCSuffix
-	}
+	pvcName := source.PVCName
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: commit.Namespace, Name: pvcName}, pvc); err != nil {
 		if isNotFound(err) {
 			return nil, r.failCommit(ctx, commit, "RootDiskMissing",
-				fmt.Errorf("root disk claim %s of devbox %s does not exist", pvcName, box.Name))
+				fmt.Errorf("commit source claim %s of devbox %s does not exist", pvcName, box.Name))
 		}
 		return nil, fmt.Errorf("get root disk claim %s: %w", pvcName, err)
 	}
 
-	job, err := r.buildJob(commit, pvcName)
+	job, err := r.buildJob(commit, source)
 	if err != nil {
 		return nil, err
 	}
@@ -251,15 +246,18 @@ func (r *DevBoxCommitReconciler) ensureBuildJob(
 	commit.Status.Phase = devpilotv1alpha1.CommitPhaseBuilding
 	commit.Status.BuildJobName = job.Name
 	commit.Status.Message = fmt.Sprintf("Building increment layer from the root disk of %s", box.Name)
-	r.setCommitCondition(commit, CommitConditionReady, metav1.ConditionFalse, "Building", commit.Status.Message)
+	r.setCommitCondition(commit, metav1.ConditionFalse, "Building", commit.Status.Message)
 	logf.FromContext(ctx).Info("Created commit build Job", "job", job.Name, "rootDiskPVC", pvcName)
 	return job, nil
 }
 
-// buildJob assembles the isolated build Job. It mounts the root disk read-only
-// and gives the container no credentials beyond the registry secret, so a
-// compromised commit binary cannot write the source or assume a cluster role.
-func (r *DevBoxCommitReconciler) buildJob(commit *devpilotv1alpha1.DevBoxCommit, pvcName string) (*batchv1.Job, error) {
+// buildJob assembles the isolated build Job. It mounts the source claim
+// read-only and gives the container no credentials beyond the registry secret,
+// so a compromised commit binary cannot write the source or assume a cluster
+// role.
+func (r *DevBoxCommitReconciler) buildJob(
+	commit *devpilotv1alpha1.DevBoxCommit, source commitSource,
+) (*batchv1.Job, error) {
 	backoff := int32(0)
 	runAsNonRoot := true
 	job := &batchv1.Job{
@@ -293,7 +291,7 @@ func (r *DevBoxCommitReconciler) buildJob(commit *devpilotv1alpha1.DevBoxCommit,
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
 						},
 					},
-					Volumes:    r.commitVolumes(pvcName),
+					Volumes:    r.commitVolumes(source.PVCName),
 					Containers: []corev1.Container{r.commitContainer(commit)},
 				},
 			},
@@ -455,6 +453,11 @@ func (r *DevBoxCommitReconciler) finishBuild(
 			errors.New("the build Job result carries no manifest digest"))
 	}
 
+	// The image is published, so the temporary clone and snapshot are nothing
+	// but wasted storage; releasing them now keeps the namespace prompt even
+	// when the commit stays around as a record.
+	r.releaseEphemeralBestEffort(ctx, commit)
+
 	now := nowUTC()
 	commit.Status.Phase = devpilotv1alpha1.CommitPhaseSucceeded
 	commit.Status.Digest = result.ManifestDigest
@@ -464,7 +467,7 @@ func (r *DevBoxCommitReconciler) finishBuild(
 	commit.Status.BaseImageDigest = result.BaseDigest
 	commit.Status.CompletionTime = &now
 	commit.Status.Message = fmt.Sprintf("Pushed %s", result.Images[0])
-	r.setCommitCondition(commit, CommitConditionReady, metav1.ConditionTrue, "Pushed", commit.Status.Message)
+	r.setCommitCondition(commit, metav1.ConditionTrue, "Pushed", commit.Status.Message)
 	logf.FromContext(ctx).Info("Commit succeeded",
 		"commit", commit.Name, "digest", result.ManifestDigest, "images", result.Images)
 	return nil
@@ -522,24 +525,26 @@ func (r *DevBoxCommitReconciler) commitInProgress(ctx context.Context, commit *d
 func (r *DevBoxCommitReconciler) failCommit(
 	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, reason string, err error,
 ) error {
+	r.releaseEphemeralBestEffort(ctx, commit)
+
 	now := nowUTC()
 	commit.Status.Phase = devpilotv1alpha1.CommitPhaseFailed
 	commit.Status.Message = err.Error()
 	commit.Status.CompletionTime = &now
-	r.setCommitCondition(commit, CommitConditionReady, metav1.ConditionFalse, reason, err.Error())
+	r.setCommitCondition(commit, metav1.ConditionFalse, reason, err.Error())
 	logf.FromContext(ctx).Error(err, "DevBoxCommit failed", "commit", commit.Name, "reason", reason)
 	return nil
 }
 
-// setCommitCondition upserts one condition, keeping the transition time stable
-// while the observed state does not change.
+// setCommitCondition upserts the Ready condition, keeping the transition time
+// stable while the observed state does not change.
 func (r *DevBoxCommitReconciler) setCommitCondition(
-	commit *devpilotv1alpha1.DevBoxCommit, condType string, status metav1.ConditionStatus, reason, message string,
+	commit *devpilotv1alpha1.DevBoxCommit, status metav1.ConditionStatus, reason, message string,
 ) {
 	now := metav1.NewTime(timeNow())
 	for i := range commit.Status.Conditions {
 		cond := &commit.Status.Conditions[i]
-		if cond.Type != condType {
+		if cond.Type != CommitConditionReady {
 			continue
 		}
 		if cond.Status != status {
@@ -552,7 +557,7 @@ func (r *DevBoxCommitReconciler) setCommitCondition(
 		return
 	}
 	commit.Status.Conditions = append(commit.Status.Conditions, metav1.Condition{
-		Type:               condType,
+		Type:               CommitConditionReady,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -586,6 +591,12 @@ func (r *DevBoxCommitReconciler) finalize(ctx context.Context, commit *devpilotv
 	if err := r.Delete(ctx, job, client.PropagationPolicy(metav1DeleteBackground)); err != nil && !isNotFound(err) {
 		return fmt.Errorf("delete build job %s: %w", job.Name, err)
 	}
+	// A commit deleted mid-flight still holds a clone claim and a snapshot.
+	// Releasing them is part of the finalizer contract, so an error here keeps
+	// the commit around for a retry instead of leaking the storage.
+	if err := r.releaseEphemeral(ctx, commit); err != nil {
+		return err
+	}
 	controllerutil.RemoveFinalizer(commit, CommitFinalizer)
 	if err := r.Update(ctx, commit); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -601,6 +612,9 @@ func (r *DevBoxCommitReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&devpilotv1alpha1.DevBoxCommit{}).
 		Owns(&batchv1.Job{}).
+		// The snapshot becomes ready asynchronously, so its status change is the
+		// signal that a restore can start instead of the poll interval.
+		Owns(&snapshotv1.VolumeSnapshot{}).
 		Named("devboxcommit").
 		Complete(r)
 }

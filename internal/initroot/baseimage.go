@@ -114,6 +114,58 @@ func EnsureLayout(root string) error {
 	return nil
 }
 
+// ClearUpper removes the writable state of the previous base image so the next
+// overlay can be assembled on top of a new digest. upper/ is the user's
+// accumulated changes, work/ holds in-flight overlayfs state tied to the old
+// lower layer, and merged/ is a mount point whose contents are invalid without
+// the lower layer it was assembled from; all three have to go together.
+//
+// The caller must guarantee that nothing writes to the root disk: the operator
+// only asks for it on a stopped DevBox whose commit was taken offline.
+func ClearUpper(root string) error {
+	// The merged mount point itself is owned by the mount; emptying it is
+	// enough and keeps the directory in place for the next Setup.
+	for _, dir := range []string{UpperDir, WorkDir, MergedDir} {
+		path := filepath.Join(root, dir)
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("clear %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// RebaseUpper replaces upper/ with an empty one before the digest invariant is
+// checked: the point of a rebase is precisely that the old upper layer does not
+// belong to the new base image. rebaseCount is incremented so the operator can
+// tell how many times the root disk was flattened.
+func RebaseUpper(root string, imageRef, imageDigest string) (BaseImageMeta, error) {
+	if imageRef == "" || imageDigest == "" {
+		return BaseImageMeta{}, errors.New("rebase needs both the image reference and the image digest")
+	}
+	count := 0
+	if existing, err := ReadBaseImageMeta(root); err == nil {
+		count = existing.RebaseCount
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return BaseImageMeta{}, err
+	}
+
+	if err := ClearUpper(root); err != nil {
+		return BaseImageMeta{}, err
+	}
+	meta := BaseImageMeta{
+		ImageRef:    imageRef,
+		ImageDigest: imageDigest,
+		CreatedAt:   time.Now().UTC(),
+		RebaseCount: count + 1,
+	}
+	// Setup recreates the tree as well, but the meta write below needs .meta/
+	// and a caller may read the result before any mount happens.
+	if err := EnsureLayout(root); err != nil {
+		return BaseImageMeta{}, err
+	}
+	return meta, nil
+}
+
 // PinBaseImage checks the digest invariant and returns the meta to persist.
 //
 //   - upper/ empty: whatever image the pod started with becomes the new pin;

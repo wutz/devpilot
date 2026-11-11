@@ -467,10 +467,54 @@ func (r *DevBoxCommitReconciler) finishBuild(
 	commit.Status.BaseImageDigest = result.BaseDigest
 	commit.Status.CompletionTime = &now
 	commit.Status.Message = fmt.Sprintf("Pushed %s", result.Images[0])
+	if commit.Spec.RebaseDevBox {
+		commit.Status.Message += r.scheduleRebase(ctx, commit, result.Images[0])
+	}
 	r.setCommitCondition(commit, metav1.ConditionTrue, "Pushed", commit.Status.Message)
 	logf.FromContext(ctx).Info("Commit succeeded",
 		"commit", commit.Name, "digest", result.ManifestDigest, "images", result.Images)
 	return nil
+}
+
+// scheduleRebase points the DevBox at the image this commit published, so its
+// next start switches base image and clears the previous upper layer.
+// resolveSource already keeps a live commit away from rebaseDevBox; the pod is
+// checked again because one can appear while the build runs, and clearing
+// upper/ afterwards would drop every write it made since the snapshot.
+//
+// The returned suffix reaches the commit message: the image is published either
+// way, so a rebase that could not be scheduled is reported there rather than
+// turning a successful push into a failed commit.
+func (r *DevBoxCommitReconciler) scheduleRebase(
+	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, image string,
+) string {
+	log := logf.FromContext(ctx)
+
+	box := &devpilotv1alpha1.DevBox{}
+	key := types.NamespacedName{Namespace: commit.Namespace, Name: commit.Spec.DevBoxName}
+	if err := r.Get(ctx, key, box); err != nil {
+		log.Error(err, "Could not read the DevBox to schedule its rebase", "devbox", commit.Spec.DevBoxName)
+		return "; could not schedule the rebase on " + commit.Spec.DevBoxName
+	}
+
+	pod := &corev1.Pod{}
+	podKey := types.NamespacedName{Namespace: box.Namespace, Name: box.Name + PodSuffix}
+	switch err := r.Get(ctx, podKey, pod); {
+	case err == nil:
+		log.Info("Skipped rebase scheduling: the root disk is in use", "devbox", box.Name, "pod", pod.Name)
+		return fmt.Sprintf("; %s started before the build finished, so pendingRebaseImage was not set", box.Name)
+	case !isNotFound(err):
+		log.Error(err, "Could not read the DevBox pod to schedule its rebase", "devbox", box.Name)
+		return "; could not schedule the rebase on " + box.Name
+	}
+
+	box.Status.PendingRebaseImage = image
+	if err := r.Status().Update(ctx, box); err != nil {
+		log.Error(err, "Could not schedule the DevBox rebase", "devbox", box.Name)
+		return "; could not schedule the rebase on " + box.Name
+	}
+	log.Info("Scheduled the DevBox rebase", "devbox", box.Name, "image", image)
+	return fmt.Sprintf("; %s will rebase onto it on its next start", box.Name)
 }
 
 // terminationMessage returns the message the commit binary wrote. The kubelet

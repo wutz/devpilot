@@ -36,17 +36,26 @@ import (
 )
 
 const (
-	testCommitImage  = "registry.example.com/devpilot-commit:test"
-	testCommitName   = "commit-1"
-	testCommitTag    = "v1"
+	testCommitImage = "registry.example.com/devpilot-commit:test"
+	testCommitName  = "commit-1"
+	testCommitTag   = "v1"
+	testSetEnvPair  = "EIN=1"
+	// testCommitDigest is a second digest, so the rebase tests can tell the
+	// committed image apart from the base one without a real registry.
 	testCommitDigest = "sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888"
-	testSetEnvPair   = "EIN=1"
 )
 
 // newOfflineCommit creates a stopped DevBox with a bound root disk claim plus a
 // commit that targets it. Nothing is running, so the commit takes the offline
 // path; the returned key is the commit to reconcile.
 func newOfflineCommit(namespace, devboxName string) types.NamespacedName {
+	return newOfflineCommitWith(namespace, devboxName, nil)
+}
+
+// newOfflineCommitWith is newOfflineCommit with a hook to shape the commit
+// before it is created: its spec is immutable, so flags like rebaseDevBox can
+// only be set here.
+func newOfflineCommitWith(namespace, devboxName string, mutate func(*devpilotv1alpha1.DevBoxCommit)) types.NamespacedName {
 	box := newTestDevBox(devboxName, namespace)
 	Expect(k8sClient.Create(ctx, box)).To(Succeed())
 
@@ -84,6 +93,9 @@ func newOfflineCommit(namespace, devboxName string) types.NamespacedName {
 				Cmd:     []string{"python", "train.py"},
 			},
 		},
+	}
+	if mutate != nil {
+		mutate(commit)
 	}
 	Expect(k8sClient.Create(ctx, commit)).To(Succeed())
 	return client.ObjectKeyFromObject(commit)
@@ -130,6 +142,21 @@ func completeBuildJob(job *batchv1.Job, message string) {
 		},
 	}}
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+}
+
+// buildResultMessage is the JSON summary a successful devpilot-commit run
+// writes, for tests that care about the finished commit rather than its fields.
+func buildResultMessage(baseDigest, image string) string {
+	message, err := json.Marshal(map[string]any{
+		"baseDigest":     baseDigest,
+		"manifestDigest": testCommitDigest,
+		"configDigest":   testCommitDigest,
+		"diffID":         testCommitDigest,
+		"layerSize":      int64(1024),
+		"images":         []string{image},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	return string(message)
 }
 
 func cleanupOfflineCommit(namespace string) {
@@ -255,6 +282,92 @@ var _ = Describe("DevBoxCommit Controller", func() {
 			Expect(commit.Status.BaseImageDigest).To(Equal(testDigest))
 			Expect(commit.Status.CompletionTime).NotTo(BeNil())
 			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "Pushed")))
+		})
+
+		It("schedules a rebase onto the committed image", func() {
+			key := newOfflineCommitWith(namespace, "devbox-rebase", func(c *devpilotv1alpha1.DevBoxCommit) {
+				c.Spec.RebaseDevBox = true
+			})
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			image := testCommitRepository + "@" + testCommitDigest
+			completeBuildJob(job, buildResultMessage(testCommitDigest, image))
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseSucceeded))
+			Expect(commit.Status.Message).To(ContainSubstring("will rebase onto it on its next start"))
+
+			box := &devpilotv1alpha1.DevBox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: "devbox-rebase",
+			}, box)).To(Succeed())
+			Expect(box.Status.PendingRebaseImage).To(Equal(image))
+			Expect(box.Spec.Image).To(Equal(testDevBoxImage), "the spec moves only once the rebase ran")
+		})
+
+		It("leaves the pending image alone for a plain commit", func() {
+			key := newOfflineCommit(namespace, "devbox-norebase")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			completeBuildJob(job, buildResultMessage(testDigest, testCommitRepository+"@"+testCommitDigest))
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseSucceeded))
+			Expect(commit.Status.Message).NotTo(ContainSubstring("rebase"))
+			Expect(commit.Status.Message).To(Equal("Pushed " + testCommitRepository + "@" + testCommitDigest))
+
+			box := &devpilotv1alpha1.DevBox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: "devbox-norebase",
+			}, box)).To(Succeed())
+			Expect(box.Status.PendingRebaseImage).To(BeEmpty())
+		})
+
+		// A pod that appears after the build started is the one window
+		// resolveSource cannot see: it runs before the Job is observed as
+		// finished, so finishBuild checks the disk again before scheduling.
+		It("skips the rebase when a pod took the root disk during the build", func() {
+			key := newOfflineCommitWith(namespace, "devbox-rebase-live", func(c *devpilotv1alpha1.DevBoxCommit) {
+				c.Spec.RebaseDevBox = true
+			})
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			Expect(k8sClient.Create(ctx, &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "devbox-rebase-live" + PodSuffix, Namespace: namespace},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: MainContainerName, Image: testDevBoxImage}},
+				},
+			})).To(Succeed())
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			completeBuildJob(job, buildResultMessage(testDigest, testCommitRepository+"@"+testCommitDigest))
+
+			commit := &devpilotv1alpha1.DevBoxCommit{}
+			Expect(k8sClient.Get(ctx, key, commit)).To(Succeed())
+			Expect(reconciler.finishBuild(ctx, commit, job)).To(Succeed())
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseSucceeded))
+			Expect(commit.Status.Message).To(ContainSubstring("started before the build finished"))
+
+			box := &devpilotv1alpha1.DevBox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: "devbox-rebase-live",
+			}, box)).To(Succeed())
+			Expect(box.Status.PendingRebaseImage).To(BeEmpty())
 		})
 
 		It("fails when the build Job reports an error", func() {

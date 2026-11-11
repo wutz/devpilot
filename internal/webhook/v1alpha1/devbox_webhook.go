@@ -152,8 +152,11 @@ func validateImmutableFields(oldObj, newObj *devpilotv1alpha1.DevBox) field.Erro
 
 	// status.activeImageDigest means upper/ was populated from that base image.
 	// The overlay stores absolute library paths and hardlinks, so mounting it
-	// over a different base silently corrupts the devbox.
-	if oldObj.Status.ActiveImageDigest != "" && oldObj.Spec.Image != newObj.Spec.Image {
+	// over a different base silently corrupts the devbox. The operator's own
+	// rebase is the exception: the new image is the digest the commit published
+	// and devpilot-init clears upper/ before it runs, so the move is safe.
+	rebase := newObj.Status.PendingRebaseImage != "" && newObj.Spec.Image == newObj.Status.PendingRebaseImage
+	if oldObj.Status.ActiveImageDigest != "" && oldObj.Spec.Image != newObj.Spec.Image && !rebase {
 		errs = append(errs, field.Forbidden(field.NewPath("spec", "image"),
 			fmt.Sprintf("the root disk was created from %s (%s); commit the devbox or reset the root disk before changing the base image",
 				oldObj.Status.ActiveImage, oldObj.Status.ActiveImageDigest)))

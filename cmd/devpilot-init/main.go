@@ -55,6 +55,7 @@ func run(args []string, stderr *os.File) int {
 		installPath string
 		gracePeriod time.Duration
 		flush       bool
+		rebase      bool
 	)
 	fs.StringVar(&installPath, "install", "",
 		"Copy this binary to the given path and exit; used by the init container that populates the shared volume.")
@@ -68,6 +69,8 @@ func run(args []string, stderr *os.File) int {
 		"Path the container's initial / is bound to read-only and used as lowerdir.")
 	fs.DurationVar(&gracePeriod, "grace-period", 30*time.Second,
 		"How long the managed command gets to exit after SIGTERM before its process group is killed.")
+	fs.BoolVar(&rebase, "rebase", false,
+		"Discard upper/ and pin the pod's base image as the new lower layer; set by the operator after a rebase commit.")
 	fs.BoolVar(&flush, "flush", false,
 		"Flush the root filesystem and exit; used by the operator before taking an online commit snapshot.")
 	if err := fs.Parse(args); err != nil {
@@ -108,6 +111,7 @@ func run(args []string, stderr *os.File) int {
 		ImageRef:    imageRef,
 		ImageDigest: imageDigest,
 		Lower:       lower,
+		Rebase:      rebase,
 		GracePeriod: gracePeriod,
 		Command:     initroot.Command{Path: argv[0], Args: argv[1:]},
 		Logf:        logf,

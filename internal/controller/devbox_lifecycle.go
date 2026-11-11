@@ -267,7 +267,9 @@ func specHash(box *devpilotv1alpha1.DevBox, pvcName string, info ImageInfo) (str
 		InitImage   string
 		PVC         string
 	}{
-		Image:       box.Spec.Image,
+		// ImageRef rather than spec.image: a pending rebase starts the pod from
+		// the committed image before spec.image is updated to match.
+		Image:       info.ImageRef,
 		Digest:      info.Digest,
 		Entrypoint:  info.Entrypoint,
 		Cmd:         info.Cmd,

@@ -409,7 +409,16 @@ func (r *DevBoxCommitReconciler) commitContainer(commit *devpilotv1alpha1.DevBox
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: &allowPrivilege,
 			ReadOnlyRootFilesystem:   &readOnlyRoot,
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{capabilityAll},
+				// The scan must read files the user's own processes made
+				// private, such as apt's 0700 lists/partial directory. Without
+				// this, root is refused like any other user and the build
+				// fails with "walk upper dir: permission denied". Read and
+				// search only, so writing stays impossible; the source claim
+				// is mounted read-only regardless.
+				Add: []corev1.Capability{capabilityDACReadSearch},
+			},
 		},
 		VolumeMounts: mounts,
 	}

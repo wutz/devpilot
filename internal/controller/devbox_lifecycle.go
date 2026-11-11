@@ -88,6 +88,9 @@ const (
 
 	// capabilityAll is the capability set that drops every Linux capability.
 	capabilityAll corev1.Capability = "ALL"
+	// capabilityDACReadSearch bypasses read and search permission checks
+	// without granting any write access to the files it unlocks.
+	capabilityDACReadSearch corev1.Capability = "DAC_READ_SEARCH"
 )
 
 // action is a parsed devpilot.wutz.dev/action value.

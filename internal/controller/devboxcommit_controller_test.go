@@ -416,6 +416,48 @@ var _ = Describe("DevBoxCommit Controller", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the failed build Job must be released")
 		})
 
+		// Deleting the Job wakes the reconciler through Owns. If that copy of the
+		// commit still reads Building, it starts a second Job that can never
+		// schedule; nothing else would ever release it.
+		It("releases a build Job that reappears after the terminal phase", func() {
+			key := newOfflineCommit(namespace, "devbox-phantom-job")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			completeBuildJob(job, `{"error":"the registry refused the push"}`)
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
+
+			// Stand in for the stale reconcile: a Job named exactly as the one
+			// buildJob() would create, on a commit that is already terminal.
+			phantom := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testCommitName + CommitJobSuffix,
+					Namespace: namespace,
+				},
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							RestartPolicy: corev1.RestartPolicyNever,
+							Containers:    []corev1.Container{{Name: "build", Image: testCommitImage}},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, phantom)).To(Succeed())
+
+			reconcileCommit(reconciler, key)
+
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, &batchv1.Job{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "a Job left on a terminal commit must be released")
+		})
+
 		It("fails when the result message is missing", func() {
 			key := newOfflineCommit(namespace, "devbox-nomessage")
 			reconciler := newCommitReconciler("")

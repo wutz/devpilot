@@ -639,9 +639,8 @@ func (r *DevBoxCommitReconciler) finalize(ctx context.Context, commit *devpilotv
 	if !controllerutil.ContainsFinalizer(commit, CommitFinalizer) {
 		return nil
 	}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: buildJobName(commit), Namespace: commit.Namespace}}
-	if err := r.Delete(ctx, job, client.PropagationPolicy(metav1DeleteBackground)); err != nil && !isNotFound(err) {
-		return fmt.Errorf("delete build job %s: %w", job.Name, err)
+	if err := r.releaseBuildJob(ctx, commit); err != nil {
+		return err
 	}
 	// A commit deleted mid-flight still holds a clone claim and a snapshot.
 	// Releasing them is part of the finalizer contract, so an error here keeps

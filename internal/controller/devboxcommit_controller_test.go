@@ -22,6 +22,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -388,6 +389,28 @@ var _ = Describe("DevBoxCommit Controller", func() {
 			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
 			Expect(commit.Status.Message).To(ContainSubstring("refused"))
 			Expect(commit.Status.Digest).To(BeEmpty())
+		})
+
+		// A failed Job keeps its pod, that pod mounts the source claim, and a
+		// Job owned by a commit that is never deleted is never collected. The
+		// claim would then sit in Terminating for good; observed on bz1-dev1.
+		It("releases the build Job when the build fails", func() {
+			key := newOfflineCommit(namespace, "devbox-failed-release")
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			completeBuildJob(job, `{"error":"the registry refused the push"}`)
+
+			reconcileCommit(reconciler, key)
+
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, &batchv1.Job{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the failed build Job must be released")
 		})
 
 		It("fails when the result message is missing", func() {

@@ -23,10 +23,12 @@ import (
 	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -366,19 +368,39 @@ func (r *DevBoxCommitReconciler) clonePVC(
 	return clone, nil
 }
 
-// releaseEphemeralBestEffort releases the temporary storage after a terminal
-// phase, where a failure must not hide the result the commit already reached:
-// the deletion is retried by the garbage collector through the owner references
-// and by the finalizer on delete.
+// releaseEphemeralBestEffort releases the build Job and the temporary storage
+// after a terminal phase, where a failure must not hide the result the commit
+// already reached: the deletion is retried by the garbage collector through the
+// owner references and by the finalizer on delete.
 func (r *DevBoxCommitReconciler) releaseEphemeralBestEffort(
 	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit,
 ) {
+	// The Job is released before the storage check below: an offline commit
+	// has no temporary storage, yet its failed pod still holds a claim, and a
+	// Job that outlives its commit keeps that claim in Terminating forever.
+	if err := r.releaseBuildJob(ctx, commit); err != nil {
+		logf.FromContext(ctx).Error(err, "Could not release the commit build Job", "commit", commit.Name)
+	}
 	if commit.Status.SnapshotName == "" && commit.Status.Mode != devpilotv1alpha1.CommitModeOnlineSnapshot {
 		return
 	}
 	if err := r.releaseEphemeral(ctx, commit); err != nil {
 		logf.FromContext(ctx).Error(err, "Could not release the temporary commit storage", "commit", commit.Name)
 	}
+}
+
+// releaseBuildJob deletes the build Job with a background propagation policy,
+// so its pod goes with it. A completed pod is what keeps the source claim from
+// terminating, and the Job is not collected on its own: its owner is the
+// commit, which stays around as a record.
+func (r *DevBoxCommitReconciler) releaseBuildJob(
+	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit,
+) error {
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: buildJobName(commit), Namespace: commit.Namespace}}
+	if err := r.Delete(ctx, job, client.PropagationPolicy(metav1DeleteBackground)); err != nil && !isNotFound(err) {
+		return fmt.Errorf("delete build job %s: %w", job.Name, err)
+	}
+	return nil
 }
 
 // releaseEphemeral deletes the temporary clone and snapshot. The claim goes

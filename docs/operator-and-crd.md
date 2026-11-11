@@ -170,7 +170,7 @@ status:
 
 ### 1.3 快捷操作注解（兼容 CLI 操作习惯，对齐 `trainpilot`）
 
-除直接 `patch spec.desiredState` 外，支持单次动作注解（控制器消费后自动清理或记录已处理时间戳）：
+除直接 `patch spec.desiredState` 外，支持单次动作注解。控制器在写回 `spec` 的同一次 `Update` 中删除该注解，因此同一个动词可以在之后任意时刻再次下发；不要依赖「已处理」标记去重：`stop` 这类注解的取值每次相同，用标记去重会把第二次请求当成重复投递而静默丢弃。
 - `devpilot.wutz.dev/action: stop=<timestamp>`：关机（等价于置 `desiredState: Stopped`）
 - `devpilot.wutz.dev/action: start=<timestamp>`：启动（等价于置 `desiredState: Running`）
 - `devpilot.wutz.dev/action: restart=<timestamp>`：优雅重启开发机 Pod（若有 `pendingRebaseImage` 则在本次重启时完成 Rebase 并清空 `upper/`）

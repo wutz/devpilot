@@ -369,7 +369,7 @@ var _ = Describe("DevBox Controller", func() {
 		}, &corev1.PersistentVolumeClaim{})).To(Succeed())
 	})
 
-	It("applies the stop annotation exactly once", func() {
+	It("consumes the action annotation so the same verb works again", func() {
 		box := newTestDevBox("action-stop", namespace)
 		box.Annotations = map[string]string{AnnotationAction: "stop=" + epochNow()}
 		key := create(box)
@@ -379,15 +379,26 @@ var _ = Describe("DevBox Controller", func() {
 
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
 		Expect(box.Spec.DesiredState).To(Equal(devpilotv1alpha1.DesiredStateStopped))
-		Expect(box.Annotations[AnnotationActionHandled]).To(Equal(box.Annotations[AnnotationAction]))
+		Expect(box.Annotations).NotTo(HaveKey(AnnotationAction))
 
-		By("not restarting work when the annotation is replayed")
+		By("applying no action when the annotation is gone")
 		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateRunning
 		Expect(k8sClient.Update(ctx, box)).To(Succeed())
 		_, err = reconcileOnce(r, key)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
 		Expect(box.Spec.DesiredState).To(Equal(devpilotv1alpha1.DesiredStateRunning))
+
+		// The marker this replaced compared annotation text, so the second
+		// "stop" looked like a replay of the first and was silently ignored.
+		By("honouring a second stop with the identical value")
+		box.Annotations = map[string]string{AnnotationAction: "stop=" + epochNow()}
+		Expect(k8sClient.Update(ctx, box)).To(Succeed())
+		_, err = reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		Expect(box.Spec.DesiredState).To(Equal(devpilotv1alpha1.DesiredStateStopped))
+		Expect(box.Annotations).NotTo(HaveKey(AnnotationAction))
 	})
 
 	It("rejects an unknown action", func() {
@@ -411,11 +422,12 @@ var _ = Describe("DevBox Controller", func() {
 		_, err := reconcileOnce(r, key)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Force a running phase, then replay the action.
+		// Force a running phase, then send the action again: the first pass
+		// consumed the annotation, so this is a fresh request, not a replay.
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
 		box.Status.Phase = devpilotv1alpha1.PhaseRunning
 		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
-		delete(box.Annotations, AnnotationActionHandled)
+		box.Annotations = map[string]string{AnnotationAction: "reset-rootdisk=" + epochNow()}
 		Expect(k8sClient.Update(ctx, box)).To(Succeed())
 
 		_, err = reconcileOnce(r, key)

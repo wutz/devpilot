@@ -35,6 +35,7 @@ const (
 	testMarker    = "root/persistence-marker"
 	testKeepMe    = "keep me\n"
 	testProfileSh = "etc/profile.d/x.sh"
+	testScript    = "print('hi')\n"
 )
 
 // layerEntry is one tar member with its body decoded as text.
@@ -98,7 +99,7 @@ func writeTree(t *testing.T, files map[string]string) string {
 func TestWriteLayerPackagesFilesAndDirectories(t *testing.T) {
 	upper := writeTree(t, map[string]string{
 		testMarker:         testKeepMe,
-		"opt/app/train.py": "print('hi')\n",
+		"opt/app/train.py": testScript,
 		testProfileSh:      "export A=1\n",
 	})
 
@@ -123,7 +124,7 @@ func TestWriteLayerPackagesFilesAndDirectories(t *testing.T) {
 			t.Errorf("%s typeflag = %v, want TypeDir", dir, layer[dir].header.Typeflag)
 		}
 	}
-	if got := layer["opt/app/train.py"].content; got != "print('hi')\n" {
+	if got := layer["opt/app/train.py"].content; got != testScript {
 		t.Errorf("train.py content = %q", got)
 	}
 	if got := layer["opt/app/train.py"].header.Typeflag; got != tar.TypeReg {

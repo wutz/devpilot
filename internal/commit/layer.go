@@ -72,9 +72,10 @@ func stageLayer(opts Options, compression string, scratchDir string) (*stagedLay
 	uncompressedHash := sha256.New()
 	compressedHash := sha256.New()
 	counter := &countWriter{}
-	// Name order matters: bytes flow through WriteLayer into the uncompressed
-	// digest, then the compressor, then the compressed digest, then the file.
-	sink := io.MultiWriter(uncompressedHash, newDigestCounter(compressedHash, counter), file)
+	// The diffID is the digest of the tar, so the hash must sit before the
+	// compressor: bytes flow through WriteLayer into the uncompressed digest,
+	// then the compressor, then the compressed digest, then the file.
+	sink := io.MultiWriter(newDigestCounter(compressedHash, counter), file)
 	compressor, err := newCompressor(sink, compression)
 	if err != nil {
 		_ = file.Close()
@@ -82,7 +83,7 @@ func stageLayer(opts Options, compression string, scratchDir string) (*stagedLay
 		return nil, err
 	}
 
-	stats, err := WriteLayer(compressor, opts)
+	stats, err := WriteLayer(io.MultiWriter(uncompressedHash, compressor), opts)
 	if err != nil {
 		_ = compressor.Close()
 		_ = file.Close()

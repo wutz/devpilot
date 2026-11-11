@@ -1,0 +1,26 @@
+# Build the devpilot-init helper binary
+# Override BASE_IMAGE to build from another registry, e.g. docker.io/library/golang:1.26
+ARG BASE_IMAGE=golang:1.26
+FROM ${BASE_IMAGE} AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+COPY . .
+
+# CGO must stay off: the binary runs inside arbitrary user images (Ubuntu,
+# Rocky, Alpine) where no libc of ours exists, and the operator copies it out
+# of this image into an emptyDir volume rather than executing it here.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+	go build -a -trimpath -ldflags="-s -w" -o devpilot-init ./cmd/devpilot-init
+
+# The image only carries the binary; the operator copies it into the DevBox
+# pod. distroless/static keeps it free of a shell and package manager so a
+# pull-scanner sees nothing installed.
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /workspace/devpilot-init /devpilot-init
+ENTRYPOINT ["/devpilot-init"]

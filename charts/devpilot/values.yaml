@@ -1,0 +1,83 @@
+# Default values for the DevPilot controller chart.
+replicaCount: 2
+
+image:
+  repository: ghcr.io/wutz/devpilot
+  # Defaults to the chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Image injected as the devpilot-init container that performs the overlay
+# chroot/pivot_root and PID 1 supervision. It must be a static binary image.
+init:
+  image:
+    repository: ghcr.io/wutz/devpilot
+    tag: ""
+    pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# CRDs are shipped in the chart's crds/ directory and are installed once, on
+# first install, by Helm itself. Keep this enabled unless the CRDs are managed
+# separately (e.g. by a platform add-on).
+crds:
+  create: true
+
+serviceAccount:
+  create: true
+  # Defaults to the fullname plus "-controller-manager".
+  name: ""
+  annotations: {}
+
+rbac:
+  # Create the ClusterRole/ClusterRoleBinding granting the controller access to
+  # devboxes and their child resources.
+  create: true
+
+leaderElection:
+  enabled: true
+
+metrics:
+  enabled: true
+  service:
+    port: 8443
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    additionalLabels: {}
+
+webhook:
+  # Admission webhook for spec validation and defaults.
+  enabled: false
+  port: 9443
+
+# Namespace where the operator runs. Empty means the release namespace.
+namespaceOverride: ""
+
+env: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+# Defaults applied to generated DevBox pods.
+defaults:
+  # RuntimeClass used for GPU devboxes.
+  runtimeClassName: nvidia
+  # Label carrying the GPU model on GPU nodes.
+  gpuModelLabel: scclabs.dev/gpu
+  # Storage class assumed to support CSI snapshots for online commits.
+  snapshotClassByStorageClass:
+    block-nvme: csi-rbdplugin-snapclass
+    block-vast-cs: vast-snapshot-cs

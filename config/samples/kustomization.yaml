@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- devpilot_v1alpha1_devbox.yaml
+- devpilot_v1alpha1_devboxcommit.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

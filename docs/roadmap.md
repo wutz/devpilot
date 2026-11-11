@@ -17,13 +17,13 @@
 
 目标：跑通「创建 GPU 开发机 → `apt`/`conda` 修改系统目录与删除文件 → 关机删 Pod 释放 GPU → 跨节点重新开机 → 所有修改与 `nvidia-smi` 100% 正常」闭环。
 
-- [ ] 使用 Kubebuilder v4 初始化 Go 工程（`github.com/wutz/devpilot`，API Group `devpilot.wutz.dev/v1alpha1`），配置 Makefile、`.golangci.yml` 与 Helm Chart（`charts/devpilot`）
-- [ ] 实现 `cmd/devpilot-init`（`CGO_ENABLED=0` 静态二进制）：
-  - [ ] `.meta/base-image.json` 首次写入与跨重启镜像摘要强校验
-  - [ ] 内核 `overlay` 挂载（`metacopy=off,index=off`）
-  - [ ] `/proc/self/mountinfo` 扫描排序与 `MS_BIND|MS_REC` 子挂载迁移（重点覆盖 `/dev/nvidia*`、`libcuda.so.*`、`nvidia-smi`、`/dev/shm`、共享存储 PVC）
-  - [ ] `pivot_root` + 懒卸载旧根 + `PR_CAPBSET_DROP` 永久剥离业务子进程的 `CAP_SYS_ADMIN`
-  - [ ] PID 1 信号转发、僵尸进程回收与 `SIGTERM` 退出前 `sync()` + `.meta/opaque-dirs.json` 刷新
+- [x] 使用 Kubebuilder v4 初始化 Go 工程（`github.com/wutz/devpilot`，API Group `devpilot.wutz.dev/v1alpha1`），配置 Makefile、`.golangci.yml` 与 Helm Chart（`charts/devpilot`）
+- [x] 实现 `cmd/devpilot-init`（`CGO_ENABLED=0` 静态二进制）：
+  - [x] `.meta/base-image.json` 首次写入与跨重启镜像摘要强校验
+  - [x] 内核 `overlay` 挂载（`metacopy=off,index=off`）
+  - [x] `/proc/self/mountinfo` 扫描排序与 `MS_BIND|MS_REC` 子挂载迁移（重点覆盖 `/dev/nvidia*`、`libcuda.so.*`、`nvidia-smi`、`/dev/shm`、共享存储 PVC）
+  - [x] `pivot_root` + 懒卸载旧根 + `PR_CAPBSET_DROP` 永久剥离业务子进程的 `CAP_SYS_ADMIN`
+  - [x] PID 1 信号转发、僵尸进程回收与 `SIGTERM` 退出前 `sync()` + `.meta/opaque-dirs.json` 刷新
 - [ ] 实现 `DevBoxReconciler` 核心生命周期：
   - [ ] rootdisk PVC 创建与在线扩容同步
   - [ ] `Pending` → `Starting` → `Running` ↔ `Stopping` → `Stopped` 状态机

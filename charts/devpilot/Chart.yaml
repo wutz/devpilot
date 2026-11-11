@@ -1,0 +1,24 @@
+apiVersion: v2
+name: devpilot
+description: |
+  DevPilot turns Kubernetes GPU containers into persistent, schedulable
+  interactive development boxes (DevBox) with full-rootfs overlay persistence,
+  SSH/Jupyter access and streamed OCI image commits.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+keywords:
+  - devbox
+  - gpu
+  - developer-environment
+  - overlayfs
+  - operator
+home: https://github.com/wutz/devpilot
+sources:
+  - https://github.com/wutz/devpilot
+maintainers:
+  - name: wutz
+annotations:
+  # Surfaced by `helm install --set crds.create=...` consumers.
+  devpilot.wutz.dev/api-group: devpilot.wutz.dev

@@ -63,6 +63,9 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          # Required at startup; the Helm chart overrides it with the real
+          # registry reference via init.image.repository/tag.
+          - --devpilot-init-image=devpilot-init:latest
         image: controller:latest
         name: manager
         ports:

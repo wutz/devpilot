@@ -1,5 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# IMG_INIT is the helper image the operator injects into DevBox pods.
+IMG_INIT ?= devpilot-init:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -120,6 +122,23 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+
+# The init binary is always cross-compiled for the cluster: it runs inside
+# user images on Linux nodes and must not carry a host libc dependency.
+# GOARCH defaults to the node architecture of the target cluster.
+GOARCH ?= amd64
+
+.PHONY: build-init
+build-init: ## Build the static devpilot-init binary for Linux.
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags="-s -w" -o bin/devpilot-init ./cmd/devpilot-init
+
+.PHONY: docker-build-init
+docker-build-init: ## Build the devpilot-init image (IMG_INIT).
+	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -f Dockerfile.init -t ${IMG_INIT} .
+
+.PHONY: docker-push-init
+docker-push-init: ## Push the devpilot-init image.
+	$(CONTAINER_TOOL) push ${IMG_INIT}
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

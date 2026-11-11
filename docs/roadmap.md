@@ -52,9 +52,18 @@
   - [x] 离线路径（`DevBox` 为 `Stopped`/`Interrupted`）：直接只读挂载 rootdisk PVC 启动隔离构建 Job
   - [x] 在线热路径（`DevBox` 为 `Running`）：触发容器 `sync`/`fsfreeze` → 创建 CSI `VolumeSnapshot` → 克隆临时只读 PVC → 启动构建 Job → Finalizer 自动清理临时 PVC 与快照
   - [x] 实现 `spec.rebaseDevBox: true`：提交成功后写入 `pendingRebaseImage`，下次重启自动切换底座并清空 `upper/`
-- [ ] 验证（`bz1-dev1` 实测）：
-  - [ ] 运行中开发机安装新依赖并触发 `DevBoxCommit`（`csi-rbdplugin-snapclass`），确认 GPU 进程无中断、新镜像成功推送到 Harbor、临时快照自动清理
-  - [ ] 用推送的新镜像直接创建 `TrainTask` 或新 `DevBox`，验证环境开箱即用且先前被 whiteout 删除的文件在新镜像中确实不存在
+- [x] 验证（`bz1-dev1` 实测）：
+  - [x] 运行中开发机安装新依赖并触发 `DevBoxCommit`（`csi-rbdplugin-snapclass`），确认 GPU 进程无中断、新镜像成功推送到 Harbor、临时快照自动清理
+  - [x] 用推送的新镜像直接创建 `TrainTask` 或新 `DevBox`，验证环境开箱即用且先前被 whiteout 删除的文件在新镜像中确实不存在
+
+  实测记录（2026-11-12，`devpilot-verify/m1-verify`，RTX 5090）：
+  提交 `m1-verify-online-m2g`（`gzip`，`block-nvme=csi-rbdplugin-snapclass`）成功推送
+  `cr.dev1.bz1.paratera.com:7443/library/m1-verify:m2-verify@sha256:f15c1bc9…`。
+  构建期间 GPU 训练进程（pid 86）持续运行 1h35m 未中断；Job、克隆 PVC、`VolumeSnapshot` 在终态后全部自动清理。
+  用该镜像启动新 `DevBox m2-verify` 后，`/root/persistence-marker` 保留、`humanize 4.16.0` 可直接导入，
+  `/opt/nvidia/entrypoint.d/` 与源开发机一致（被 whiteout 删除的条目在新镜像中不存在）。
+  过程中定位并修复 6 个仅生产环境暴露的缺陷：#15 flush 路径、#16 构建 Job 用户、#17 失败 Job 泄漏、
+  #18 私有目录读取权限、#19 终态后幽灵 Job、#20 增量层 diffID 计算顺序。
 
 ---
 

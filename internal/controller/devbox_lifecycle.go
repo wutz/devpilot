@@ -50,10 +50,9 @@ const (
 	// incompatible spec change triggers a pod replacement.
 	AnnotationSpecHash = "devpilot.wutz.dev/spec-hash"
 	// AnnotationAction carries a one-shot stop/start/restart/reset-rootdisk.
+	// The controller removes it once applied, so the same verb can be sent
+	// again later without being mistaken for a replay.
 	AnnotationAction = "devpilot.wutz.dev/action"
-	// AnnotationActionHandled records the last action value consumed, so the
-	// same annotation is never applied twice.
-	AnnotationActionHandled = "devpilot.wutz.dev/action-handled"
 
 	// InitContainerName copies the devpilot-init binary into the shared volume.
 	InitContainerName = "devpilot-init-install"

@@ -35,13 +35,8 @@ import (
 func (r *DevBoxReconciler) applyAction(ctx context.Context, box *devpilotv1alpha1.DevBox) (bool, error) {
 	log := logf.FromContext(ctx)
 
-	raw := box.Annotations[AnnotationAction]
-	if strings.TrimSpace(raw) == "" {
-		return false, nil
-	}
-	if box.Annotations[AnnotationActionHandled] == raw {
-		// A previous reconcile already applied it; the user has not removed
-		// the annotation yet, and re-applying would restart on every pass.
+	raw := strings.TrimSpace(box.Annotations[AnnotationAction])
+	if raw == "" {
 		return false, nil
 	}
 	parsed, err := parseAction(raw)
@@ -49,10 +44,11 @@ func (r *DevBoxReconciler) applyAction(ctx context.Context, box *devpilotv1alpha
 		return false, err
 	}
 
-	if box.Annotations == nil {
-		box.Annotations = map[string]string{}
-	}
-	box.Annotations[AnnotationActionHandled] = raw
+	// The annotation is consumed by deleting it in the same update that carries
+	// the spec change. A marker was tried first and broke the second request
+	// with the same verb: "stop" is the same string every time, so the marker
+	// made a later stop look like a replay of the first one.
+	delete(box.Annotations, AnnotationAction)
 
 	switch parsed.verb {
 	case actionStop:
@@ -78,7 +74,7 @@ func (r *DevBoxReconciler) applyAction(ctx context.Context, box *devpilotv1alpha
 		log.Info("Reset DevBox root disk", "devbox", box.Name)
 	}
 
-	// The spec change and the handled marker go out together, so a crash
+	// The spec change and the annotation removal go out together, so a crash
 	// between them can never replay the action against the new spec. The
 	// update response carries the server's status, so status mutations are
 	// re-applied afterwards and persisted by Reconcile's status patch.

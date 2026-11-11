@@ -43,9 +43,17 @@ type ExecFlusher struct {
 }
 
 // flushCommand is the argv handed to the DevBox container.
+//
+// It must not be InitBinaryPath: that path lives in the emptyDir the init
+// container staged, which pivot_root leaves outside the new root, so exec
+// fails with "no such file or directory". /proc/1/exe is the running helper
+// itself and survives the pivot.
 func flushCommand() []string {
-	return []string{InitBinaryPath, "--flush"}
+	return []string{selfExePath, "--flush"}
 }
+
+// selfExePath is PID 1 of the main container, which is always devpilot-init.
+const selfExePath = "/proc/1/exe"
 
 // Flush runs the flush in the main container of the pod. Anything other than a
 // zero exit is reported so the commit fails instead of snapshotting a disk with

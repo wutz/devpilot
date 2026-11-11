@@ -1,0 +1,459 @@
+/*
+Copyright 2026 wutz.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	apiresource "k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
+)
+
+// applyAction consumes the one-shot action annotation. It reports whether it
+// changed the object, which tells Reconcile to persist status and stop.
+func (r *DevBoxReconciler) applyAction(ctx context.Context, box *devpilotv1alpha1.DevBox) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	raw := box.Annotations[AnnotationAction]
+	if strings.TrimSpace(raw) == "" {
+		return false, nil
+	}
+	if box.Annotations[AnnotationActionHandled] == raw {
+		// A previous reconcile already applied it; the user has not removed
+		// the annotation yet, and re-applying would restart on every pass.
+		return false, nil
+	}
+	parsed, err := parseAction(raw)
+	if err != nil {
+		return false, err
+	}
+
+	if box.Annotations == nil {
+		box.Annotations = map[string]string{}
+	}
+	box.Annotations[AnnotationActionHandled] = raw
+
+	switch parsed.verb {
+	case actionStop:
+		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateStopped
+	case actionStart:
+		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateRunning
+	case actionRestart:
+		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateRunning
+		if err := r.deletePod(ctx, box.Status.PodName, box.Namespace); err != nil {
+			return false, err
+		}
+		log.Info("Restarting DevBox", "pod", box.Status.PodName)
+	case actionResetRootDisk:
+		if !canReset(box.Status.Phase) {
+			return false, fmt.Errorf("reset-rootdisk requires a stopped devbox, current phase is %q", box.Status.Phase)
+		}
+		if err := r.deletePod(ctx, box.Status.PodName, box.Namespace); err != nil {
+			return false, err
+		}
+		if err := r.deleteRootDisk(ctx, box); err != nil {
+			return false, err
+		}
+		log.Info("Reset DevBox root disk", "devbox", box.Name)
+	}
+
+	// The spec change and the handled marker go out together, so a crash
+	// between them can never replay the action against the new spec. The
+	// update response carries the server's status, so status mutations are
+	// re-applied afterwards and persisted by Reconcile's status patch.
+	status := box.Status
+	if err := r.Update(ctx, box); err != nil {
+		return false, fmt.Errorf("apply action %q: %w", raw, err)
+	}
+	box.Status = status
+
+	switch parsed.verb {
+	case actionRestart:
+		box.Status.Message = "Restarting the devbox pod"
+	case actionResetRootDisk:
+		box.Status.ActiveImage = ""
+		box.Status.ActiveImageDigest = ""
+		box.Status.RootDiskPVC = ""
+		box.Status.Phase = devpilotv1alpha1.PhasePending
+		box.Status.Message = "Root disk deleted; it is recreated on the next start"
+	}
+	return true, nil
+}
+
+// deletePod removes the named pod, tolerating absence.
+func (r *DevBoxReconciler) deletePod(ctx context.Context, name, namespace string) error {
+	if name == "" {
+		return nil
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+	err := r.Delete(ctx, pod, client.PropagationPolicy(metav1.DeletePropagationBackground))
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("delete pod %s: %w", name, err)
+	}
+	return nil
+}
+
+// deleteRootDisk removes the root disk claim; the next start recreates it from
+// the pinned base image.
+func (r *DevBoxReconciler) deleteRootDisk(ctx context.Context, box *devpilotv1alpha1.DevBox) error {
+	name := box.Status.RootDiskPVC
+	if name == "" {
+		name = box.Name + RootDiskPVCSuffix
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: box.Namespace},
+	}
+	if err := r.Delete(ctx, pvc); err != nil && !isNotFound(err) {
+		return fmt.Errorf("delete root disk %s: %w", name, err)
+	}
+	return nil
+}
+
+// ensureRootDisk creates the claim when missing and grows it in place when the
+// user raises spec.rootDisk.size.
+func (r *DevBoxReconciler) ensureRootDisk(ctx context.Context, box *devpilotv1alpha1.DevBox) (*corev1.PersistentVolumeClaim, error) {
+	name := box.Name + RootDiskPVCSuffix
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: name}, pvc)
+	if isNotFound(err) {
+		wanted, buildErr := r.rootDiskPVC(box, name)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		logf.FromContext(ctx).Info("Creating root disk claim", "pvc", name, "size", box.Spec.RootDisk.Size.String())
+		if createErr := r.Create(ctx, wanted); createErr != nil {
+			if isAlreadyExists(createErr) {
+				// Another reconcile won the race; read the winner back.
+				if getErr := r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: name}, pvc); getErr != nil {
+					return nil, fmt.Errorf("get root disk %s: %w", name, getErr)
+				}
+			} else {
+				return nil, fmt.Errorf("create root disk %s: %w", name, createErr)
+			}
+		} else {
+			return wanted, nil
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("get root disk %s: %w", name, err)
+	}
+
+	if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != box.Spec.RootDisk.StorageClassName {
+		return nil, fmt.Errorf("root disk %s uses storage class %q but the spec requires %q; "+
+			"reset the root disk to move it", name, *pvc.Spec.StorageClassName, box.Spec.RootDisk.StorageClassName)
+	}
+	if err := r.growRootDisk(ctx, pvc, box.Spec.RootDisk.Size); err != nil {
+		return nil, err
+	}
+	return pvc, nil
+}
+
+// growRootDisk raises the requested size. Kubernetes never shrinks a claim, so
+// a smaller spec is ignored rather than rejected at reconcile time.
+func (r *DevBoxReconciler) growRootDisk(ctx context.Context, pvc *corev1.PersistentVolumeClaim, wanted apiresource.Quantity) error {
+	if wanted.Cmp(pvc.Spec.Resources.Requests[corev1.ResourceStorage]) <= 0 {
+		return nil
+	}
+
+	key := client.ObjectKeyFromObject(pvc)
+	for range 3 {
+		latest := &corev1.PersistentVolumeClaim{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return fmt.Errorf("get root disk %s for expansion: %w", key.Name, err)
+		}
+		if wanted.Cmp(latest.Spec.Resources.Requests[corev1.ResourceStorage]) <= 0 {
+			return nil
+		}
+		requests := latest.Spec.Resources.Requests.DeepCopy()
+		if requests == nil {
+			requests = corev1.ResourceList{}
+		}
+		requests[corev1.ResourceStorage] = wanted
+		latest.Spec.Resources.Requests = requests
+		if err := r.Update(ctx, latest); err != nil {
+			if isConflict(err) {
+				continue
+			}
+			return fmt.Errorf("expand root disk %s: %w", key.Name, err)
+		}
+		logf.FromContext(ctx).Info("Expanded root disk claim", "pvc", key.Name, "size", wanted.String())
+		return nil
+	}
+	return fmt.Errorf("expand root disk %s: too many update conflicts", key.Name)
+}
+
+// rootDiskPVC builds the claim for a new DevBox.
+func (r *DevBoxReconciler) rootDiskPVC(box *devpilotv1alpha1.DevBox, name string) (*corev1.PersistentVolumeClaim, error) {
+	storageClass := box.Spec.RootDisk.StorageClassName
+	mode := corev1.PersistentVolumeFilesystem
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: box.Namespace,
+			Labels: map[string]string{
+				LabelManagedBy:  ValueManagedBy,
+				LabelDevBoxName: box.Name,
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: &storageClass,
+			VolumeMode:       &mode,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: box.Spec.RootDisk.Size,
+				},
+			},
+		},
+	}
+	if err := ctrlSetOwner(pvc, box, r.Scheme); err != nil {
+		return nil, fmt.Errorf("set owner reference on root disk claim: %w", err)
+	}
+	return pvc, nil
+}
+
+// buildPod assembles the pod template. It is a pure function of the spec, the
+// resolved image and the claim name, so the spec hash stays stable.
+func (r *DevBoxReconciler) buildPod(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, info ImageInfo) (*corev1.Pod, error) {
+	limits, requests := containerResources(box.Spec.Resources)
+	shm, err := shmSize(box.Spec.Resources)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := specHash(box, pvc.Name, info)
+	if err != nil {
+		return nil, err
+	}
+
+	env := append([]corev1.EnvVar{
+		{Name: "DEVPILOT_BASE_IMAGE", Value: box.Spec.Image},
+		{Name: "DEVPILOT_BASE_IMAGE_DIGEST", Value: info.Digest},
+		{Name: "DEVPILOT_ROOT_DISK", Value: RootDiskMountPath},
+		{Name: "HOME", Value: "/root"},
+	}, box.Spec.Env...)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      box.Name + PodSuffix,
+			Namespace: box.Namespace,
+			Labels: map[string]string{
+				LabelManagedBy:  ValueManagedBy,
+				LabelDevBoxName: box.Name,
+			},
+			Annotations: map[string]string{
+				AnnotationSpecHash: hash,
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy:                corev1.RestartPolicyNever,
+			AutomountServiceAccountToken: new(false),
+			EnableServiceLinks:           new(false),
+			SecurityContext: &corev1.PodSecurityContext{
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+			InitContainers: []corev1.Container{initContainer(r.Config.InitImage)},
+			Containers:     []corev1.Container{mainContainer(box, info, env, limits, requests, shm)},
+			Volumes:        volumes(box, pvc, shm),
+			NodeSelector:   nodeSelectors(box),
+			Tolerations:    box.Spec.Tolerations,
+		},
+	}
+	if box.Spec.Resources.GPUs > 0 {
+		pod.Spec.RuntimeClassName = new("nvidia")
+	}
+	if err := ctrlSetOwner(pod, box, r.Scheme); err != nil {
+		return nil, fmt.Errorf("set owner reference on pod: %w", err)
+	}
+	return pod, nil
+}
+
+// initContainer copies the helper binary into the shared emptyDir. The user
+// image needs neither a shell nor cp, so arbitrary distroless images work.
+func initContainer(image string) corev1.Container {
+	return corev1.Container{
+		Name:            InitContainerName,
+		Image:           image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{"/devpilot-init"},
+		Args:            []string{"--install=" + InitBinaryPath},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                new(int64(0)),
+			AllowPrivilegeEscalation: new(false),
+			ReadOnlyRootFilesystem:   new(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: InitVolumeName, MountPath: InitMountPath},
+		},
+	}
+}
+
+// mainContainer runs devpilot-init as PID 1, which assembles the overlay and
+// supervises the image's own entrypoint.
+func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, env []corev1.EnvVar, limits, requests corev1.ResourceList, shm *apiresource.Quantity) corev1.Container {
+	_ = shm // reserved for a future explicit tmpfs mount flag
+	return corev1.Container{
+		Name:            MainContainerName,
+		Image:           box.Spec.Image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         append([]string{InitBinaryPath}, devBoxCommand(info)...),
+		Env:             env,
+		Resources: corev1.ResourceRequirements{
+			Limits:   limits,
+			Requests: requests,
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                new(int64(0)),
+			AllowPrivilegeEscalation: new(false),
+			ReadOnlyRootFilesystem:   new(false),
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			Capabilities: &corev1.Capabilities{
+				Add: []corev1.Capability{
+					"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
+					"NET_BIND_SERVICE", "SETGID", "SETUID", "SYS_ADMIN", "SYS_CHROOT",
+				},
+				Drop: []corev1.Capability{"ALL"},
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: InitVolumeName, MountPath: InitMountPath},
+			{Name: RootDiskVolumeName, MountPath: RootDiskMountPath},
+			{Name: ShmVolumeName, MountPath: "/dev/shm"},
+		},
+	}
+}
+
+// devBoxCommand renders the flags and the user command for devpilot-init.
+// Flags must precede "--"; everything after it is exec'd as the user process.
+func devBoxCommand(info ImageInfo) []string {
+	argv := []string{
+		"--image-ref=" + info.ImageRef,
+		"--image-digest=" + info.Digest,
+		"--",
+	}
+	argv = append(argv, info.Entrypoint...)
+	argv = append(argv, info.Cmd...)
+	if len(argv) == 3 {
+		// The image has no long running command of its own: keep the
+		// container alive so the user can attach, as documented.
+		argv = append(argv, "sleep", "infinity")
+	}
+	return argv
+}
+
+// volumes lists the pod volumes: the helper binary, the root disk and shared
+// memory. /dev/shm becomes a memory backed emptyDir so the default 64Mi limit
+// does not break DataLoader workers.
+func volumes(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, shm *apiresource.Quantity) []corev1.Volume {
+	vols := []corev1.Volume{
+		{
+			Name:         InitVolumeName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		{
+			Name: RootDiskVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name},
+			},
+		},
+		{
+			Name: ShmVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium:    corev1.StorageMediumMemory,
+					SizeLimit: shm,
+				},
+			},
+		},
+	}
+	seen := map[string]struct{}{
+		InitVolumeName:     {},
+		RootDiskVolumeName: {},
+		ShmVolumeName:      {},
+	}
+	for _, extra := range box.Spec.Volumes {
+		if _, dup := seen[extra.Name]; dup || extra.PersistentVolumeClaim == nil {
+			continue
+		}
+		seen[extra.Name] = struct{}{}
+		vols = append(vols, corev1.Volume{
+			Name: extra.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: extra.PersistentVolumeClaim.DeepCopy(),
+			},
+		})
+	}
+	return vols
+}
+
+// setFailed marks the DevBox as failed without blocking future reconciles: a
+// spec change or a new action moves it forward again.
+func (r *DevBoxReconciler) setFailed(ctx context.Context, box *devpilotv1alpha1.DevBox, reason string, err error) {
+	box.Status.Phase = devpilotv1alpha1.PhaseFailed
+	box.Status.StartingStep = devpilotv1alpha1.StartingStepNone
+	box.Status.Message = err.Error()
+	r.setCondition(box, ConditionReady, metav1.ConditionFalse, reason, err.Error())
+	logf.FromContext(ctx).Error(err, "DevBox failed", "devbox", box.Name, "reason", reason)
+}
+
+// setCondition upserts one condition, keeping the transition time stable while
+// the observed state does not change.
+func (r *DevBoxReconciler) setCondition(box *devpilotv1alpha1.DevBox, condType string, status metav1.ConditionStatus, reason, message string) {
+	now := metav1.NewTime(timeNow())
+	for i := range box.Status.Conditions {
+		cond := &box.Status.Conditions[i]
+		if cond.Type != condType {
+			continue
+		}
+		if cond.Status != status {
+			cond.LastTransitionTime = now
+		}
+		cond.Status = status
+		cond.Reason = reason
+		cond.Message = message
+		cond.ObservedGeneration = box.Generation
+		return
+	}
+	box.Status.Conditions = append(box.Status.Conditions, metav1.Condition{
+		Type:               condType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: box.Generation,
+		LastTransitionTime: now,
+	})
+}
+
+// patchStatus writes the status subresource, merging from the pre-reconcile
+// status so a concurrent writer's changes are not clobbered.
+func (r *DevBoxReconciler) patchStatus(ctx context.Context, before, after *devpilotv1alpha1.DevBox) error {
+	after.Status.ObservedGeneration = after.Generation
+	base := after.DeepCopy()
+	base.Status = before.Status
+	if err := r.Status().Patch(ctx, after, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("patch DevBox status: %w", err)
+	}
+	return nil
+}

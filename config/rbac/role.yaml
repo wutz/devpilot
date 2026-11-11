@@ -1,0 +1,35 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - devpilot.wutz.dev
+  resources:
+  - devboxcommits
+  - devboxes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - devpilot.wutz.dev
+  resources:
+  - devboxcommits/finalizers
+  - devboxes/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - devpilot.wutz.dev
+  resources:
+  - devboxcommits/status
+  - devboxes/status
+  verbs:
+  - get
+  - patch
+  - update

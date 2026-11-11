@@ -1,0 +1,19 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devpilot.fullname" . }}-metrics
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    control-plane: controller-manager
+    {{- include "devpilot.labels" . | nindent 4 }}
+spec:
+  selector:
+    control-plane: controller-manager
+    {{- include "devpilot.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: {{ .Values.metrics.service.port }}
+      protocol: TCP
+      targetPort: metrics
+{{- end }}

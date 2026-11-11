@@ -80,6 +80,9 @@ type PushRequest struct {
 	Created time.Time
 	// Options are passed to every registry request.
 	Options []remote.Option
+	// NameOptions configure reference parsing, for example name.Insecure for a
+	// plain HTTP registry.
+	NameOptions []name.Option
 }
 
 // PushResult reports what was published.
@@ -117,7 +120,7 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	}
 
 	opts := append([]remote.Option{remote.WithContext(ctx), remote.WithPlatform(Platform)}, req.Options...)
-	baseRef, err := name.ParseReference(req.BaseReference)
+	baseRef, err := name.ParseReference(req.BaseReference, req.NameOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("parse base reference %q: %w", req.BaseReference, err)
 	}
@@ -225,7 +228,7 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 		Stats:          layer.Stats(),
 	}
 
-	repo, err := name.NewRepository(req.Repository)
+	repo, err := name.NewRepository(req.Repository, req.NameOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("parse destination repository %q: %w", req.Repository, err)
 	}

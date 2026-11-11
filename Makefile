@@ -2,6 +2,8 @@
 IMG ?= controller:latest
 # IMG_INIT is the helper image the operator injects into DevBox pods.
 IMG_INIT ?= devpilot-init:latest
+# IMG_COMMIT is the streaming image builder the DevBoxCommit reconciler runs.
+IMG_COMMIT ?= devpilot-commit:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -139,6 +141,18 @@ docker-build-init: ## Build the devpilot-init image (IMG_INIT).
 .PHONY: docker-push-init
 docker-push-init: ## Push the devpilot-init image.
 	$(CONTAINER_TOOL) push ${IMG_INIT}
+
+.PHONY: build-commit
+build-commit: ## Build the static devpilot-commit binary for Linux.
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags="-s -w" -o bin/devpilot-commit ./cmd/devpilot-commit
+
+.PHONY: docker-build-commit
+docker-build-commit: ## Build the devpilot-commit image (IMG_COMMIT).
+	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -f Dockerfile.commit -t ${IMG_COMMIT} .
+
+.PHONY: docker-push-commit
+docker-push-commit: ## Push the devpilot-commit image.
+	$(CONTAINER_TOOL) push ${IMG_COMMIT}
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

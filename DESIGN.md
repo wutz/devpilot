@@ -466,3 +466,31 @@ Cards are rectangles at 12–16px radius; marketing buttons and category tabs ar
 - Don't set body copy in pure black (`#000000`) — the brand's ink is #171717 and body steps to `{colors.body}`.
 - Don't add a second decorative system — the mesh gradient is the only flourish; everything else is ink on white.
 - Don't loosen the display tracking — large Geist headings carry tight negative letter-spacing by design.
+
+---
+
+## DevPilot 控制台主题（本项目选型）
+
+DevPilot 面向在 GPU 上长时间写代码、反复开关机的开发者，界面信息密度高、常驻不看「营销页」，所以直接沿用上面 Vercel/Geist 的墨色体系，不引入第二套装饰：颜色只用来标记状态，不用来分区。所有 token 已在 `internal/dashboard/assets/index.html` 的 `:root` 中落地。
+
+| 用途 | Token | 值 |
+| --- | --- | --- |
+| 正文与标题 | `--ink` | `#171717` |
+| 次级文字 | `--body` | `#4d4d4d` |
+| 说明文字 | `--mute` | `#8f8f8f` |
+| 页面底色 | `--canvas` | `#fafafa` |
+| 卡片底色 | `--elevated` | `#ffffff` |
+| 分隔线 | `--hairline` | `#ebebeb` |
+| 链接与焦点 | `--link` | `#0070f3` |
+| 运行中 | `--cyan` | `#50e3c2` |
+| 停机 | `--faint` | `#a1a1a1` |
+| 构建中 | `--violet` | `#7928ca` |
+| 中断 / 失败 | `--error` | `#ee0000` |
+| 预警（即将回收） | `--warning` | `#f5a623` |
+
+约定：
+
+- 状态一律用 pill + 文字，不靠颜色单独表达（色盲可读）；pill 底色取对应色的低透明度版本。
+- 卡片是 1px hairline 描边，不用阴影；圆角控件 6px、卡片 12px。
+- 计费金额与秒数用等宽字体右对齐，避免数字跳动时错位。
+- 按钮只有两档：主操作（开机 / 保存镜像）用 `--ink` 实底，次操作（关机 / 明细）用描边。

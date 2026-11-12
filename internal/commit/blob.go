@@ -102,7 +102,7 @@ func (u *RegistryUploader) Upload(ctx context.Context, repository string, blob v
 		return err
 	}
 	if exists {
-		u.logf("Layer blob already in %s", repo.RepositoryStr(), "digest", digest.String())
+		u.logf("Layer blob already in the repository", "repository", repo.RepositoryStr(), "digest", digest.String())
 		return nil
 	}
 

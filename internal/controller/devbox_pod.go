@@ -546,6 +546,16 @@ func (r *DevBoxReconciler) setCondition(box *devpilotv1alpha1.DevBox, condType s
 	})
 }
 
+// conditionOf returns one condition of a DevBox, or nil when it has none.
+func conditionOf(box *devpilotv1alpha1.DevBox, condType string) *metav1.Condition {
+	for i := range box.Status.Conditions {
+		if box.Status.Conditions[i].Type == condType {
+			return &box.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
 // clearCondition drops a condition that no longer applies, so a spec that turns
 // a feature off does not leave a stale verdict behind.
 func (r *DevBoxReconciler) clearCondition(box *devpilotv1alpha1.DevBox, condType string) {

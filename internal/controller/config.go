@@ -49,7 +49,20 @@ type Config struct {
 	// affects the URLs written into status; 443 is the scheme default and is
 	// omitted from them.
 	IngressPort int32
+	// RetentionReclaim says what happens to a root disk whose DevBox sat out
+	// its retention window: ReclaimTrash labels it for the volumetrash
+	// recycler so the data can be recovered for the buffer period, and
+	// ReclaimDelete deletes it at once. Empty means ReclaimTrash.
+	RetentionReclaim string
 }
+
+// The two ways an expired root disk is reclaimed.
+const (
+	// ReclaimTrash hands the claim to the volumetrash recycler.
+	ReclaimTrash = "trash"
+	// ReclaimDelete deletes the claim together with the DevBox.
+	ReclaimDelete = "delete"
+)
 
 // DefaultIngressPort is the HTTPS port the generated URLs assume when the
 // operator does not override it.
@@ -59,6 +72,15 @@ const DefaultIngressPort int32 = 443
 // needs both a domain to build hosts from and a class to bind them to.
 func (c Config) HTTPExposed() bool {
 	return strings.TrimSpace(c.IngressDomain) != "" && strings.TrimSpace(c.IngressClass) != ""
+}
+
+// RetentionReclaimMode returns the reclaim behaviour for expired root disks,
+// defaulting to the recycler.
+func (c Config) RetentionReclaimMode() string {
+	if strings.TrimSpace(c.RetentionReclaim) == "" {
+		return ReclaimTrash
+	}
+	return c.RetentionReclaim
 }
 
 // ParseSnapshotClassMapping parses "storageClass=snapshotClass,..." into a map.
@@ -129,6 +151,9 @@ func (c Config) Validate() error {
 	}
 	if c.IngressPort < 0 || c.IngressPort > 65535 {
 		errs = append(errs, fmt.Errorf("ingress port %d is out of range", c.IngressPort))
+	}
+	if mode := c.RetentionReclaimMode(); mode != ReclaimTrash && mode != ReclaimDelete {
+		errs = append(errs, fmt.Errorf("retention reclaim %q must be %q or %q", c.RetentionReclaim, ReclaimTrash, ReclaimDelete))
 	}
 	return errors.Join(errs...)
 }

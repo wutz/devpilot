@@ -48,6 +48,7 @@ spec:
             {{- end }}
             - --devpilot-init-image={{ .Values.init.image.repository }}:{{ default .Chart.AppVersion .Values.init.image.tag }}
             - --registry-default-snapshot-class={{ include "devpilot.defaultSnapshotClasses" . | quote }}
+            - --retention-reclaim={{ .Values.retention.reclaim }}
           env:
             - name: DEVPILOT_NAMESPACE
               valueFrom:

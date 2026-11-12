@@ -17,6 +17,7 @@ rules:
   - persistentvolumeclaims
   - pods
   - secrets
+  - services
   verbs:
   - create
   - delete
@@ -81,4 +82,24 @@ rules:
   - delete
   - get
   - list
+  - watch
+- apiGroups:
+  - sshgateway.wutz.dev
+  resources:
+  - sshgateways
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sshgateway.wutz.dev
+  resources:
+  - sshroutes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch

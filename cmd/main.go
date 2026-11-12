@@ -37,6 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
+	sshgatewayv1alpha1 "github.com/wutz/sshgateway/api/v1alpha1"
+
 	"github.com/wutz/devpilot/internal/controller"
 	webhookv1alpha1 "github.com/wutz/devpilot/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -53,6 +55,9 @@ func init() {
 	utilruntime.Must(devpilotv1alpha1.AddToScheme(scheme))
 	// VolumeSnapshot is the only external type the commit controller writes.
 	utilruntime.Must(snapshotv1.AddToScheme(scheme))
+	// SSHRoute is the only gateway type the devbox controller writes. The API
+	// may be absent from the cluster; it is only registered, not looked up here.
+	utilruntime.Must(sshgatewayv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 

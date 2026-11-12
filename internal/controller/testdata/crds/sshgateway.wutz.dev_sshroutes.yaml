@@ -1,0 +1,259 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: sshroutes.sshgateway.wutz.dev
+spec:
+  group: sshgateway.wutz.dev
+  names:
+    categories:
+    - sshgateway
+    kind: SSHRoute
+    listKind: SSHRouteList
+    plural: sshroutes
+    shortNames:
+    - sroute
+    singular: sshroute
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SSHRoute attaches SSH connections to a backend Service in its namespace,
+          modelled on the Gateway API routes. It lets an SSH client with one of the
+          listed keys log in to the sshd behind the Service.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of SSHRoute
+            properties:
+              parentRefs:
+                description: parentRefs are the gateways the route attaches to.
+                items:
+                  description: ParentReference names the SSHGateway a route attaches
+                    to.
+                  properties:
+                    name:
+                      description: name of the SSHGateway.
+                      minLength: 1
+                      type: string
+                    namespace:
+                      description: namespace of the SSHGateway. Defaults to the route's
+                        namespace.
+                      type: string
+                    sectionName:
+                      description: sectionName is the listener of the gateway. Defaults
+                        to every listener.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 8
+                minItems: 1
+                type: array
+              rules:
+                description: rules route the connections to their backends.
+                items:
+                  description: SSHRouteRule forwards the connections of some usernames
+                    to a backend.
+                  properties:
+                    authorizedKeys:
+                      description: |-
+                        authorizedKeys are the OpenSSH public keys allowed to log in as the
+                        matched usernames. Passwords are never offered, so at least one key is
+                        required. Keys with options (from=, command=) and certificates are
+                        rejected.
+                      items:
+                        type: string
+                      maxItems: 64
+                      minItems: 1
+                      type: array
+                    backendRefs:
+                      description: backendRefs is the backend. Exactly one is supported.
+                      items:
+                        description: SSHBackendRef is the Service a matched connection
+                          is forwarded to.
+                        properties:
+                          name:
+                            description: |-
+                              name of the Service in the route's namespace that exposes an sshd. The
+                              Secret <name>-hostkey holds the SSH host key of that sshd; the gateway pins it.
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                          port:
+                            description: port of the sshd behind the Service. Defaults
+                              to 22.
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
+                          username:
+                            description: |-
+                              username is the account the gateway logs in to the backend as. The
+                              backend must accept the platform identity key for it.
+                            pattern: ^[a-z_][a-z0-9_-]{0,31}$
+                            type: string
+                        required:
+                        - name
+                        - username
+                        type: object
+                      maxItems: 1
+                      minItems: 1
+                      type: array
+                    matches:
+                      description: matches are the usernames the rule answers to.
+                      items:
+                        description: SSHRouteMatch selects a connection by the username
+                          it logs in as.
+                        properties:
+                          username:
+                            description: |-
+                              username the client logs in as. The gateway routes on this name, so it
+                              must be unique across the routes of a gateway.
+                            pattern: ^[a-z_][a-z0-9_-]{0,31}$
+                            type: string
+                        required:
+                        - username
+                        type: object
+                      maxItems: 16
+                      minItems: 1
+                      type: array
+                  required:
+                  - authorizedKeys
+                  - backendRefs
+                  - matches
+                  type: object
+                maxItems: 16
+                minItems: 1
+                type: array
+            required:
+            - parentRefs
+            - rules
+            type: object
+          status:
+            description: status defines the observed state of SSHRoute
+            properties:
+              parents:
+                description: parents reports the state of the route on each parent
+                  gateway.
+                items:
+                  description: RouteParentStatus is the status of a route on one parent
+                    gateway.
+                  properties:
+                    conditions:
+                      description: conditions represent the state of the route on
+                        the parent.
+                      items:
+                        description: Condition contains details for one aspect of
+                          the current state of this API Resource.
+                        properties:
+                          lastTransitionTime:
+                            description: |-
+                              lastTransitionTime is the last time the condition transitioned from one status to another.
+                              This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                            format: date-time
+                            type: string
+                          message:
+                            description: |-
+                              message is a human readable message indicating details about the transition.
+                              This may be an empty string.
+                            maxLength: 32768
+                            type: string
+                          observedGeneration:
+                            description: |-
+                              observedGeneration represents the .metadata.generation that the condition was set based upon.
+                              For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                              with respect to the current state of the instance.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                          reason:
+                            description: |-
+                              reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                              Producers of specific condition types may define expected values and meanings for this field,
+                              and whether the values are considered a guaranteed API.
+                              The value should be a CamelCase string.
+                              This field may not be empty.
+                            maxLength: 1024
+                            minLength: 1
+                            pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                            type: string
+                          status:
+                            description: status of the condition, one of True, False,
+                              Unknown.
+                            enum:
+                            - "True"
+                            - "False"
+                            - Unknown
+                            type: string
+                          type:
+                            description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                            maxLength: 316
+                            pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                            type: string
+                        required:
+                        - lastTransitionTime
+                        - message
+                        - reason
+                        - status
+                        - type
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - type
+                      x-kubernetes-list-type: map
+                    controllerName:
+                      description: controllerName of the controller that wrote the
+                        status.
+                      type: string
+                    parentRef:
+                      description: parentRef is the gateway the status is about.
+                      properties:
+                        name:
+                          description: name of the SSHGateway.
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: namespace of the SSHGateway. Defaults to the
+                            route's namespace.
+                          type: string
+                        sectionName:
+                          description: sectionName is the listener of the gateway.
+                            Defaults to every listener.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  required:
+                  - controllerName
+                  - parentRef
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

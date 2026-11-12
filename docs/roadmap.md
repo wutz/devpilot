@@ -4,7 +4,7 @@
 
 ---
 
-## M0 架构与 CRD 规范设计（当前）
+## M0 架构与 CRD 规范设计
 
 - [x] 完成方案选型对比：确立「块存储 PVC 持久化 OverlayFS `upperdir` + 非特权流式 OCI 层追加」路线
 - [x] 核实目标集群 `bz1-dev1` 基础能力：K8s `v1.32.5`、Linux `5.15.0`、`containerd 2.0.5`、`RuntimeClass: nvidia`、块存储 `block-nvme` / `block-vast-cs` 及 CSI `VolumeSnapshotClass`（`csi-rbdplugin-snapclass` / `vast-snapshot-cs`），确认 `ImageVolume` 未启用

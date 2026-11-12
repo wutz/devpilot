@@ -186,3 +186,12 @@
 > - 关键数字：`nvcr.io/nvidia/pytorch:25.08-py3` 共 **76 层、11,039.7 MB**，单层最大 3572.4 MB、2321.3 MB。这与 M4 上 `m4-cred` 失败时的 **69 分钟 / 约 11 GB** 完全吻合——**当年被掐断的根本不是增量层，而是基础镜像层**，增量（那个仓库当时增量很小）早就传完了。之前把锅记在增量上是误判；
 > - 为什么之前没暴露：`remote.Write` 对**同仓库已有**的 blob 只发 HEAD；`m1-verify` 之类仓库早先由别的方式写满了这些层，所以 HEAD 全 200。新建的 `m5-big` / `m5-cred`（后者只有 32 字节增量）仓库是空的，于是每一层都要重新搬。跨注册表不能 `mount`（`nvidia/pytorch` 不在 Harbor 里），Harbor 的 blob 存储是否全局去重不改变协议层的事实——协议上 HEAD 404 就得传；
 > - 修复：`Push` 在写 manifest 之前把**最终镜像的所有层**都交给 `req.Uploader`（新增 `uploadBlobs`），已存在的按 HEAD 跳过，缺的按 64 MiB 分块传输、可续传。这样任一层的失败都只丢一个分块，而不是丢一条 3.5 GB 的请求。
+
+- [x] 端到端实测：空仓库 + 11 GB 基础镜像 + 3 GiB 增量层完整落地
+
+> 实测记录（2026-11-12，`devpilot-verify/m5-big2`，registry `cr.dev1.bz1.paratera.com:7443/library/m5-big2`，`devpilot-commit:m5-2`，devbox `m3-idle`，`consistency: Sync`、`compression: gzip`、`cleanPackageCache: true`）：
+> - 为了逼出最坏路径，目标用了一个**从未写入过**的新仓库，所以 76 个基础层一个也无法 HEAD 命中，必须全部经 Harbor 传一遍，叠加 3 GiB 增量；
+> - 结果：`status.phase = Succeeded`，`Pushed …/library/m5-big2:v1@sha256:f22b085e97795f5d287da3d8d5abb544e1855b5361d137cf4fc05f5d4a470d64`，耗时 **80 分钟**（08:29:50Z → 09:50:05Z）。这正是 M4 上 69 分钟 / 约 11 GB 被 400 掐断的那条路径，现在跑通了；
+> - 回读 registry 的 manifest 复核：**77 层**（76 基础 + 1 增量），压缩后合计 **14,261.9 MB**，末层 **3,222.2 MB**（即那个 3 GiB 增量，与此前 `m5-big` 单独上传的 3,222,209,296 字节吻合）；
+> - 传输形态：基础层按 64 MiB 逐块 PATCH（日志里可见 `offset=67108864 total=3572…`、`offset=103092640 total=…` 这类推进），已存在的层被 HEAD 跳过并打出 `Layer blob already in the repository`。因此断了也只丢一块，而不是丢掉一条 3.5 GB 的请求；
+> - 资源回收正常：提交结束后 build pod 与本次提交专用的临时凭证 `m5-big2-registry` 都已删除，`devpilot-verify-build` 里的 `harbor-push` 保留。

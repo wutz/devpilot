@@ -71,11 +71,19 @@
 
 目标：补齐生产级用户体验与智算云商业化运营闭环。
 
-- [ ] 容器内 SSH 服务托管（兼容自带 `sshd` 与内置 Go SSH Server 兜底），持久化 `<devbox>-hostkey` Secret
+- [x] 容器内 SSH 服务托管（兼容自带 `sshd` 与内置 Go SSH Server 兜底），持久化 `<devbox>-hostkey` Secret
 - [ ] 对接 `sshgateway.wutz.dev` 自动生成 `SSHRoute`（验证 VS Code / Cursor Remote-SSH 端到端连接与端口转发）
 - [ ] JupyterLab 自动托管与自定义 HTTP 端口暴露（生成 Gateway API `HTTPRoute` / Ingress，适配 `bz1-dev1` `:7443` 端口）
 - [ ] 抢占式（`Spot`）驱逐检测与 `Interrupted` 状态流转、运行段计费账本（`status.segments[]`）
 - [ ] 闲置自动关机（`idleShutdownMinutes`）与连续停机/中断 15 天超期自动回收（含提前预警 Event 与 `volumetrash` 对接）
+
+> 实测记录（2026-11-12，`devpilot-verify/m3-ssh-verify`，RTX 5090，`devpilot-init:m3-2`）：
+> - `<devbox>-hostkey` Secret 在 Pod 之前创建，含 420 字节 OpenSSH 私钥、对应公钥与 `authorized_keys`，owner reference 指向 `DevBox`；
+> - 公钥登录成功（`/root`，`TERM`/PTY 正常），未授权密钥被拒（`Permission denied (publickey)`），未开放密码登录；
+> - 删除 Pod 由控制器重建后主机密钥与 Secret `resourceVersion` 均未变化，`known_hosts` 严格校验通过，`/opt/m3/probe.txt` 跨重启保留；
+> - `ssh -tt host 'cmd'` 从无终端脚本发起（`pty-req` 尺寸 0x0）可正常拿到 PTY 并执行完整命令，非 PTY 的 `ssh host cmd` 正确回传退出码（`exit 9` → 9）；
+> - 实测暴露并修复两个缺陷：#23 的 0x0 `pty-req` 被当成「不要 PTY」，以及 stdin 立刻 EOF 时关闭 PTY 主设备导致 shell 被 `SIGHUP` 杀死（Linux 上必现，macOS 上偶发）；
+> - 同期发现并修正：集群上 `devpilot-manager-role` 未随 RBAC 清单更新，缺少 `secrets` 权限导致 Secret informer 无法建立、reconcile 卡在等待 PVC。
 
 ---
 

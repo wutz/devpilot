@@ -91,6 +91,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		cmdLine      string
 		resultFile   string
 		dryRun       bool
+		chunkSize    int64
 	)
 	fs.StringVar(&rootDisk, "rootdisk", initroot.DefaultRootDisk,
 		"Mount point of the root disk PVC; upper/ and .meta/ are read from here.")
@@ -131,6 +132,10 @@ func run(args []string, stdout, stderr *os.File) int {
 		"Write the JSON result here; the kubelet surfaces it as the pod termination message.")
 	fs.BoolVar(&dryRun, "dry-run", false,
 		"Stage the layer and report it without pushing anything.")
+	fs.Int64Var(&chunkSize, "upload-chunk-size", commit.ChunkSize,
+		"Bytes per registry upload request. The layer is sent in chunks this size and "+
+			"resumed from the last acknowledged byte when one fails, so a proxy timeout "+
+			"costs one chunk instead of the whole layer. 0 sends it in one request.")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -180,6 +185,20 @@ func run(args []string, stdout, stderr *os.File) int {
 		logf("Could not configure the registry client", "err", err.Error())
 		return 2
 	}
+	authenticator, err := registryAuthenticator(username, secrets, repository)
+	if err != nil {
+		logf("Could not configure the registry client", "err", err.Error())
+		return 2
+	}
+	var uploader commit.BlobUploader
+	if chunkSize > 0 {
+		uploader = &commit.RegistryUploader{
+			ChunkSize:   chunkSize,
+			Auth:        authenticator,
+			NameOptions: nameOptions(plainHTTP),
+			Logf:        func(msg string, kv ...any) { logf(msg, kv...) },
+		}
+	}
 
 	request := commit.PushRequest{
 		BaseReference:     baseImage,
@@ -195,6 +214,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		ScratchDir:        scratchDir,
 		Options:           options,
 		NameOptions:       nameOptions(plainHTTP),
+		Uploader:          uploader,
 	}
 
 	logf("Starting commit", "base", baseImage, "digest", baseDigest,
@@ -368,6 +388,26 @@ func nameOptions(plainHTTP bool) []name.Option {
 		return []name.Option{name.Insecure}
 	}
 	return nil
+}
+
+// registryAuthenticator returns the credential the chunked uploader uses.
+//
+// It duplicates the choice registryOptions makes, because remote.Option values
+// cannot be taken apart: the uploader needs the authenticator itself, not the
+// opaque option that carries it.
+func registryAuthenticator(username, password, repository string) (authn.Authenticator, error) {
+	switch {
+	case username != "" && password != "":
+		return &authn.Basic{Username: username, Password: password}, nil
+	case username != "":
+		return nil, fmt.Errorf("a username was given without a password")
+	default:
+		repo, err := name.NewRepository(repository)
+		if err != nil {
+			return nil, fmt.Errorf("parse destination repository %q: %w", repository, err)
+		}
+		return authn.DefaultKeychain.Resolve(repo)
+	}
 }
 
 // registryOptions builds the request options shared with the registry.

@@ -83,6 +83,10 @@ type PushRequest struct {
 	// NameOptions configure reference parsing, for example name.Insecure for a
 	// plain HTTP registry.
 	NameOptions []name.Option
+	// Uploader transfers the increment layer before the manifest is written.
+	// Nil sends it through remote.Write, which is correct but puts the whole
+	// layer in one request; see BlobUploader.
+	Uploader BlobUploader
 }
 
 // PushResult reports what was published.
@@ -120,31 +124,11 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	}
 
 	opts := append([]remote.Option{remote.WithContext(ctx), remote.WithPlatform(Platform)}, req.Options...)
-	baseRef, err := name.ParseReference(req.BaseReference, req.NameOptions...)
+	base, err := readBase(req, opts)
 	if err != nil {
-		return nil, fmt.Errorf("parse base reference %q: %w", req.BaseReference, err)
+		return nil, err
 	}
-	if req.BaseDigest != "" {
-		digest, err := v1.NewHash(req.BaseDigest)
-		if err != nil {
-			return nil, fmt.Errorf("parse base digest %q: %w", req.BaseDigest, err)
-		}
-		baseRef = baseRef.Context().Digest(digest.String())
-	}
-
-	base, err := remote.Image(baseRef, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("read base image %s: %w", baseRef, err)
-	}
-	baseDigest, err := base.Digest()
-	if err != nil {
-		return nil, fmt.Errorf("read base digest: %w", err)
-	}
-	baseMedia, err := base.MediaType()
-	if err != nil {
-		return nil, fmt.Errorf("read base media type: %w", err)
-	}
-	docker := baseMedia == types.DockerManifestSchema2
+	docker := base.media == types.DockerManifestSchema2
 
 	layer, err := stageLayer(Options{
 		UpperDir:          req.UpperDir,
@@ -161,8 +145,8 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if docker && media != types.DockerLayer && media != types.DockerUncompressedLayer {
-		return nil, fmt.Errorf("base image %s uses a docker manifest, which cannot carry a %s layer; commit with gzip compression", baseRef, req.Compression)
+	if err := checkLayerMedia(docker, media, base.ref, req.Compression); err != nil {
+		return nil, err
 	}
 	layer.mediaType = media
 
@@ -170,7 +154,7 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read layer diff id: %w", err)
 	}
-	baseConfig, err := base.ConfigFile()
+	baseConfig, err := base.image.ConfigFile()
 	if err != nil {
 		return nil, fmt.Errorf("read base config: %w", err)
 	}
@@ -182,7 +166,7 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	created = created.Truncate(time.Second)
 	config := applyChanges(baseConfig, req.Changes, created)
 
-	image, err := mutate.ConfigFile(base, config)
+	image, err := mutate.ConfigFile(base.image, config)
 	if err != nil {
 		return nil, fmt.Errorf("apply config: %w", err)
 	}
@@ -200,8 +184,8 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	}
 	// The manifest format follows the base image, otherwise a docker base would
 	// silently turn into an OCI image and lose consumer compatibility.
-	image = mutate.MediaType(image, baseMedia)
-	if baseMedia == types.DockerManifestSchema2 {
+	image = mutate.MediaType(image, base.media)
+	if base.media == types.DockerManifestSchema2 {
 		image = mutate.ConfigMediaType(image, types.DockerConfigJSON)
 	}
 
@@ -219,8 +203,8 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	}
 
 	result := &PushResult{
-		BaseDigest:     baseDigest.String(),
-		BaseMediaType:  baseMedia,
+		BaseDigest:     base.digest.String(),
+		BaseMediaType:  base.media,
 		ConfigDigest:   configDigest,
 		ManifestDigest: manifestDigest,
 		DiffID:         diffID,
@@ -231,6 +215,13 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	repo, err := name.NewRepository(req.Repository, req.NameOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("parse destination repository %q: %w", req.Repository, err)
+	}
+	if req.Uploader != nil {
+		// remote.Write skips a blob it finds by digest, so uploading it here
+		// first is what keeps the manifest write to a few kilobytes.
+		if err := req.Uploader.Upload(ctx, req.Repository, layer); err != nil {
+			return nil, fmt.Errorf("upload the increment layer to %s: %w", req.Repository, err)
+		}
 	}
 	for _, tag := range req.Tags {
 		tag = strings.TrimSpace(tag)
@@ -248,6 +239,59 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 		return nil, fmt.Errorf("no destination tag was usable")
 	}
 	return result, nil
+}
+
+// baseImage is the image being extended, with its descriptor already read.
+//
+// No layer blob is fetched: the digest, media type and config all live in the
+// manifest, which is a few kilobytes.
+type baseImage struct {
+	ref    name.Reference
+	image  v1.Image
+	digest v1.Hash
+	media  types.MediaType
+}
+
+// readBase resolves the base reference and reads its descriptor.
+func readBase(req PushRequest, opts []remote.Option) (*baseImage, error) {
+	ref, err := name.ParseReference(req.BaseReference, req.NameOptions...)
+	if err != nil {
+		return nil, fmt.Errorf("parse base reference %q: %w", req.BaseReference, err)
+	}
+	// Pinning the digest keeps the pushed manifest built on exactly the image
+	// the caller based its filesystem on, even if the tag moves meanwhile.
+	if req.BaseDigest != "" {
+		digest, err := v1.NewHash(req.BaseDigest)
+		if err != nil {
+			return nil, fmt.Errorf("parse base digest %q: %w", req.BaseDigest, err)
+		}
+		ref = ref.Context().Digest(digest.String())
+	}
+	image, err := remote.Image(ref, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("read base image %s: %w", ref, err)
+	}
+	digest, err := image.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("read base digest: %w", err)
+	}
+	media, err := image.MediaType()
+	if err != nil {
+		return nil, fmt.Errorf("read base media type: %w", err)
+	}
+	return &baseImage{ref: ref, image: image, digest: digest, media: media}, nil
+}
+
+// checkLayerMedia rejects a layer a docker manifest cannot describe.
+func checkLayerMedia(docker bool, media types.MediaType, ref name.Reference, compression string) error {
+	if !docker {
+		return nil
+	}
+	if media == types.DockerLayer || media == types.DockerUncompressedLayer {
+		return nil
+	}
+	return fmt.Errorf("base image %s uses a docker manifest, which cannot carry a %s layer; commit with gzip compression",
+		ref, compression)
 }
 
 // applyChanges clones the base config and overlays the requested metadata.

@@ -163,3 +163,17 @@
 > - 新参数 `--dashboard-bind-address`（空即关闭），Chart 侧 `dashboard.enabled` / `dashboard.bindAddress` / `dashboard.service.*`。`targetPort` 由 `bindAddress` 末尾端口推导（`devpilot.dashboardPort`），`enabled: true` 而地址无端口时**直接渲染失败**，避免 Service 指向一个从未监听的端口；
 > - 镜像构建缺陷：`.dockerignore` 原先只放行 `**/*.go`，`go:embed assets` 在容器里报 `pattern assets: no matching files found`（本地能过是因为本地有文件）。已补 `!internal/dashboard/assets/**`；这个缺陷只会在**发布流水线**上暴露，本地 `go build` 测不出来；
 > - 视觉遵循 `DESIGN.md`（Vercel/Geist）：ink `#171717`、canvas `#fafafa`、hairline `#ebebeb`、6px 控件 / 12px 卡片圆角、等宽大写 eyebrow、扁平描边卡片；`DESIGN.md` 由 `npx getdesign add vercel` 生成后修掉了一行被污染的 `fontWeight` 才让 frontmatter 可解析。
+
+---
+
+## M5 流式保存镜像的可靠传输（M4 实测暴露）
+
+- [x] `devpilot-commit` 按 OCI 分发协议分块上传增量层，并在连接被切断后从注册表确认的偏移续传
+
+> 实测记录（2026-11-12，`devpilot-verify/m4-cred`，registry `cr.dev1.bz1.paratera.com:7443/library`，`devpilot-commit` 旧版本）：
+> - 缺陷：`m4-repo` 的 commit 在 **69 分钟、约 11 GB** 之后以 `PATCH https://…/v2/library/m4-cred/blobs/uploads/…: unexpected status code 400 Bad Request`（nginx 的 HTML 错误页，34m CPU / 23Mi 内存）失败。排除了凭证与查询参数（同一凭证建 session 成功），也排除了 nginx `proxy-body-size`（ Harbor Ingress 上是 `"0"`，即不限）与 registry `maxuploadsize`（未配置）；
+> - 根因是 `go-containerregistry` v0.20 的 `writer.streamBlob` **把整层放进一个 PATCH**（`ContentLength = size`）。11 GB 的增量就是一条挂着一小时的请求，中间任何一跳都会把它掐断；而 `uploadOne` 的重试是从头再来，所以越重的镜像越不可能成功。`remote.Write` 本身反而没问题——它按 digest 发现 blob 已存在就跳过，所以只要先把 blob 传上去，写 manifest 只有几 KB；
+> - 修复：新增 `internal/commit/blob.go` 的 `RegistryUploader`，显式实现 `HEAD`（已有即跳过）/ `POST` 建 session / 分段 `PATCH`（带 `Content-Range: start-end`）/ `GET` 读 `Range` 续传 / `PUT ?digest=` 收尾 / 再 `HEAD` 确认，默认每块 64 MiB（`--upload-chunk-size`，0 关闭并回落到 `remote.Write`）；
+> - 两个协议细节在单测里暴露：① 层流是 `io.NopCloser` 包的普通 reader，**不可 Seek**，所以续传不能靠回头读，正常路径只向前读并保留刚发出的那块，注册表只吃了一半时直接从内存补发（只有注册表回退到本块之前时才要求 Seek，不可 Seek 就明确报错）；② 注册表的 `Location` 允许是**相对路径**（Harbor 每次 PATCH 都这么回），早先原样沿用会让下一个请求没有 scheme，现在统一按注册表 base 解析；
+> - 单测覆盖五条路径：分块边界与请求数、半截被吃后从 `1536` 续传（不是从头）、已存在的 blob 零 PATCH、注册表报不出偏移时明确失败、`ChunkSize=0` 回落到单请求；
+> - 附带重构：`Push` 的 gocyclo 顶到 32（上限 30），拆出 `readBase` / `checkLayerMedia`；`baseDigest`/`baseMedia` 收进 `baseImage` 结构体。

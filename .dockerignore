@@ -9,6 +9,10 @@
 !**/*.go
 **/*_test.go
 
+# Re-include the static files the manager embeds (go:embed needs them on disk,
+# so leaving them out fails the build with "pattern assets: no matching files").
+!internal/dashboard/assets/**
+
 # Re-include Go module files
 !go.mod
 !go.sum

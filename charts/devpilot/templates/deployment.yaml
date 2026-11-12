@@ -51,6 +51,9 @@ spec:
             - --registry-default-snapshot-class={{ include "devpilot.defaultSnapshotClasses" . | quote }}
             - --retention-reclaim={{ .Values.retention.reclaim }}
             - --build-namespace-suffix={{ .Values.build.namespaceSuffix | quote }}
+            {{- if .Values.dashboard.enabled }}
+            - --dashboard-bind-address={{ .Values.dashboard.bindAddress }}
+            {{- end }}
           env:
             - name: DEVPILOT_NAMESPACE
               valueFrom:
@@ -71,6 +74,11 @@ spec:
             {{- if .Values.webhook.enabled }}
             - containerPort: {{ .Values.webhook.port }}
               name: webhook
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.dashboard.enabled }}
+            - containerPort: {{ include "devpilot.dashboardPort" . }}
+              name: console
               protocol: TCP
             {{- end }}
           securityContext:

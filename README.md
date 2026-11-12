@@ -38,6 +38,19 @@ DevBox (devpilot.wutz.dev/v1alpha1)                DevBoxCommit (devpilot.wutz.d
 | 开关机与抢占 | 关机删 Pod 释放 GPU/CPU/内存；抢占驱逐转入 `Interrupted` 保留系统盘与共享盘；连续关机/中断超期（默认 15 天）自动回收 | 对齐 `ai-prd` 容器实例抢占语义与 `trainpilot` 计费段模型 |
 | 在线/离线保存镜像 | 离线直读 PVC；在线通过 CSI `VolumeSnapshot` 秒级 COW 快照克隆临时只读卷，不中断 GPU 训练进程；支持可选 Rebase 清空 `upper/` | `csi-rbdplugin-snapclass`、`vast-snapshot-cs`、Harbor `project-registry` |
 | 开发环境接入 | 容器内同命名空间 `sshd`（VS Code / Cursor Remote-SSH 直通完整 rootfs 与 GPU）+ JupyterLab / WebIDE 路由 | `sshgateway` (`SSHRoute`)、Gateway API / Ingress (`:7443`) |
+| 内置控制台 | 管理器同进程托管静态看板：实例卡片、状态流转、开关机、保存镜像、计费明细；每个请求都带调用者自己的 Bearer Token，看板不持有任何独立权限 | Chart `dashboard.enabled`、`--dashboard-bind-address` |
+
+## 内置 Web 控制台
+
+控制台随管理器一起编译，静态资源通过 `go:embed` 打进镜像，默认关闭。开启后浏览器里的每个请求都把用户填写的 Bearer Token 转发给 API Server，因此**看板能做什么完全由调用者的 RBAC 决定**：只有 `devpilot-member-view` 的人只能看，有 `devpilot-member-edit` 的人才能开关机和发起固化。
+
+```bash
+helm upgrade --install devpilot oci://ghcr.io/wutz/charts/devpilot \
+  --namespace devpilot-system --set dashboard.enabled=true
+kubectl -n devpilot-system port-forward svc/devpilot-dashboard 8082:8082
+```
+
+`dashboard.bindAddress`（默认 `:8082`）同时决定监听端口与 Service 的 `targetPort`；置空但 `enabled: true` 会直接渲染失败，避免 Service 指向一个从未监听的端口。控制台本身不校验 token 是谁，只校验有没有传，所以对外暴露时务必套一层认证（Ingress + OIDC 过滤器等），而不是裸放 `LoadBalancer`。
 
 ## 文档目录
 

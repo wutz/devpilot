@@ -1,0 +1,24 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devpilot.fullname" . }}-dashboard
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    control-plane: controller-manager
+    {{- include "devpilot.labels" . | nindent 4 }}
+  {{- with .Values.dashboard.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.dashboard.service.type }}
+  selector:
+    control-plane: controller-manager
+    {{- include "devpilot.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.dashboard.service.port }}
+      protocol: TCP
+      targetPort: console
+{{- end }}

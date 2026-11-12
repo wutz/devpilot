@@ -74,7 +74,7 @@
 - [x] 容器内 SSH 服务托管（兼容自带 `sshd` 与内置 Go SSH Server 兜底），持久化 `<devbox>-hostkey` Secret
 - [x] 对接 `sshgateway.wutz.dev` 自动生成 `SSHRoute`（验证 VS Code / Cursor Remote-SSH 端到端连接与端口转发）
 - [x] JupyterLab 自动托管与自定义 HTTP 端口暴露（生成 Gateway API `HTTPRoute` / Ingress，适配 `bz1-dev1` `:7443` 端口）
-- [ ] 抢占式（`Spot`）驱逐检测与 `Interrupted` 状态流转、运行段计费账本（`status.segments[]`）
+- [x] 抢占式（`Spot`）驱逐检测与 `Interrupted` 状态流转、运行段计费账本（`status.segments[]`）
 - [ ] 闲置自动关机（`idleShutdownMinutes`）与连续停机/中断 15 天超期自动回收（含提前预警 Event 与 `volumetrash` 对接）
 
 > 实测记录（2026-11-12，`devpilot-verify/m3-ssh-verify`，RTX 5090，`devpilot-init:m3-2`）：
@@ -94,6 +94,15 @@
 > - 关机再开机后 `Service` 与 `SSHRoute` 原样保留（用户名不被释放、不改变），重新连接在 `StrictHostKeyChecking=yes` 下通过，`hostname` 与登录用户不变；
 > - 环境限制：MetalLB 地址池已耗尽（`no available IPs`），`SSHGateway` 的 `status.addresses` 为空，故 `status.endpoints.ssh` 回落到 Pod 级地址；NodePort `30322` 在网关 Pod 所在节点 `gn-10-243-145-105` 上可达，共享 VIP `10.243.147.247` 上不可达，实测即经该 NodePort 完成；
 > - 集群上 `devpilot-manager-role` 再次需随清单补齐 `services` 与 `sshgateway.wutz.dev/sshgateways,sshroutes` 权限（已 patch，未重新 apply 整份清单）。
+
+> 实测记录（2026-11-12，`devpilot-verify/m3-spot`，RTX 5090，manager `devpilot:m3-5`）：
+> - `billingMode: Spot` + `pricePerHour: "2.80"` 的 DevBox 进入 `Running` 时 `status.segments[0]` 立即打开（`id=1`、`nodeName` 记录所在节点、`endTime` 为空、`cost` 为空），重复 reconcile 不改写 `startTime`；
+> - 把 Pod 状态改为 `Failed`/`Evicted`（模拟节点回收）后，控制器进入 `Interrupted`：`interruptedAt` 与 `nonRunningSince` 写入、`nodeName`/`podName` 清空、`Ready=False/Preempted`、新增条件 `Preempted=True`、Pod 被删除，且此后不再原地拉起（持续观察 1 分钟无新 Pod）；
+> - 账本在同一个 status patch 里关闭运行段：`endReason=Preempted`、`billedSeconds=24`、`cost=0.018666`（`2.80 × 24/3600` 定点截断），`totalCost` 由账本求和派生；
+> - `devbox/m3-spot` 上出现 `Warning Interrupted` Event（`The spot node was reclaimed; the root disk is retained`）；`status.segments` 上限 256，超出时只丢弃最旧的已关闭段；
+> - 用户手动 `action: start` 后 `interruptedAt` 清空、条件 `Preempted` 移除，在同一块 root disk 上重新调度并打开 `segments[1]`，历史段与 `totalCost` 保留；
+> - 按需（`OnDemand`）DevBox 同样有账本，但被驱逐时走 `Failed` + `endReason=NodeFailure`，不会被标记为抢占；
+> - 实测暴露并修复两个缺陷：① 中断后由 Pod 删除事件触发的 reconcile 从 informer 缓存读到过期的 `Running` 状态，又把 Pod 拉了起来（改为 DevBox 直读 API server），并补了对应 envtest 回归用例；② 新 events API 需要 `events.k8s.io/events` 的 `create;patch` 权限，原 RBAC 只有核心组 `events`，导致中断 Event 被 API server 拒绝。
 
 > 实测记录（2026-11-12，`devpilot-verify/m3-route`，RTX 5090，manager `devpilot:m3-3` + `devpilot-init:m3-3`）：
 > - 暴露方式选型：集群 Ingress 控制器为 `ingress-nginx`（`LoadBalancer 10.243.147.247`，`8080:30935,7443:30199/TCP`，`--default-ssl-certificate=cert-manager/default-tls`），现有路由统一为 `ingressClassName: nginx` + 仅写 `tls.hosts` 不写 `secretName`；MetalLB 池已耗尽且 Gateway API 被 agentgateway 占用，故选择 `networking.k8s.io/v1 Ingress` 而非 `HTTPRoute`，URL 统一带 `:7443`；

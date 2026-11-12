@@ -55,8 +55,10 @@ func (r *DevBoxReconciler) applyAction(ctx context.Context, box *devpilotv1alpha
 		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateStopped
 	case actionStart:
 		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateRunning
+		r.resumeInterrupted(box)
 	case actionRestart:
 		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateRunning
+		r.resumeInterrupted(box)
 		if err := r.deletePod(ctx, box.Status.PodName, box.Namespace); err != nil {
 			return false, err
 		}

@@ -7,10 +7,11 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - events
+  - nodes
   verbs:
-  - create
-  - patch
+  - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -32,6 +33,14 @@ rules:
   - pods/exec
   verbs:
   - create
+- apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
 - apiGroups:
   - batch
   resources:

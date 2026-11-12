@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,6 +42,13 @@ type DevBoxReconciler struct {
 	// Images resolves base image digests and configs; nil means
 	// RegistryResolver, and tests inject a fake to stay offline.
 	Images ImageResolver
+	// Recorder publishes Events about interruptions. It is optional: the tests
+	// build the reconciler by hand and the helpers skip a nil recorder.
+	Recorder events.EventRecorder
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache. A nil one falls back to Client, which is what the envtest suite
+	// wants because its client does not cache.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxes,verbs=get;list;watch;create;update;patch;delete
@@ -51,6 +59,8 @@ type DevBoxReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sshgateway.wutz.dev,resources=sshroutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sshgateway.wutz.dev,resources=sshgateways,verbs=get;list;watch
@@ -62,7 +72,11 @@ func (r *DevBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log := logf.FromContext(ctx)
 
 	box := &devpilotv1alpha1.DevBox{}
-	if err := r.Get(ctx, req.NamespacedName, box); err != nil {
+	// The DevBox is read from the API server, not the informer cache: the pod
+	// deletion that follows an interruption wakes the controller before the
+	// cache has seen the status patch, and acting on that stale Running phase
+	// would relaunch the pod the interruption just removed.
+	if err := r.reader().Get(ctx, req.NamespacedName, box); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !box.DeletionTimestamp.IsZero() {
@@ -79,13 +93,19 @@ func (r *DevBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if handled, err := r.applyAction(ctx, box); err != nil {
 		box.Status.Phase = devpilotv1alpha1.PhaseFailed
 		box.Status.Message = err.Error()
+		r.settleBilling(box, timeNow())
 		return ctrl.Result{}, r.patchStatus(ctx, original, box)
 	} else if handled {
+		r.settleBilling(box, timeNow())
 		return ctrl.Result{}, r.patchStatus(ctx, original, box)
 	}
 
 	result, err := r.reconcileLifecycle(ctx, box)
 	log.V(1).Info("Reconciled DevBox", "phase", box.Status.Phase, "desiredState", box.Spec.DesiredState)
+	// The ledger is settled after the lifecycle wrote the phase, so a segment
+	// closes in the same status patch that moves the devbox to Stopped or
+	// Interrupted.
+	r.settleBilling(box, timeNow())
 	if statusErr := r.patchStatus(ctx, original, box); statusErr != nil {
 		return result, statusErr
 	}
@@ -168,6 +188,29 @@ func (r *DevBoxReconciler) reconcileStopped(ctx context.Context, box *devpilotv1
 // reconcileRunning starts the pod or reflects its progress into status.
 func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, pod *corev1.Pod) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	// An interruption is a resting state, not a retry: relaunching in place
+	// would fight the scheduler for the spot capacity that just went away and
+	// bill a GPU the user has not asked for again. The start action leaves it.
+	if message, reclaimed := r.reclaim(ctx, box, pod); reclaimed {
+		r.markInterrupted(box, "Preempted", message)
+		if err := r.deletePod(ctx, pod.Name, box.Namespace); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("DevBox interrupted", "pod", pod.Name, "node", box.Status.NodeName, "reason", message)
+		return ctrl.Result{}, nil
+	}
+	if box.Status.Phase == devpilotv1alpha1.PhaseInterrupted {
+		// A pod left behind by the interruption would otherwise be adopted on
+		// the next start and billed as if it had never stopped.
+		if pod != nil {
+			if err := r.deletePod(ctx, pod.Name, box.Namespace); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: requeueWhileStarting}, nil
+		}
+		return ctrl.Result{}, nil
+	}
 
 	if pvc.Status.Phase != corev1.ClaimBound {
 		box.Status.Phase = devpilotv1alpha1.PhasePending
@@ -285,6 +328,7 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 		box.Status.NonRunningSince = nil
 		box.Status.ScheduledReleaseTime = nil
 		box.Status.InterruptedAt = nil
+		r.clearCondition(box, ConditionPreempted)
 		r.setCondition(box, ConditionReady, metav1ConditionTrue, "PodReady", "The devbox is running on "+pod.Spec.NodeName)
 		log.Info("DevBox running", "pod", pod.Name, "node", pod.Spec.NodeName)
 		return ctrl.Result{}, nil
@@ -363,8 +407,23 @@ func (r *DevBoxReconciler) currentPod(ctx context.Context, box *devpilotv1alpha1
 	return pod, nil
 }
 
+// reader returns the client the reconciler reads DevBoxes with: the direct API
+// reader when the manager provided one, the injected client otherwise.
+func (r *DevBoxReconciler) reader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DevBoxReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorder("devbox")
+	}
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&devpilotv1alpha1.DevBox{}).
 		Owns(&corev1.Pod{}).

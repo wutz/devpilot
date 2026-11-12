@@ -181,7 +181,7 @@
 - [x] 目标仓库缺少基础镜像层时，也走分块上传（跨注册表无法 mount，`remote.Write` 会把 3.5 GB 的层塞进一个 PATCH）
 
 > 实测记录（2026-11-12，`devpilot-verify/m5-big`，registry `cr.dev1.bz1.paratera.com:7443/library/m5-big`，`devpilot-commit:m5-1`）：
-> - 现象：分块上传er 把 3 GiB 增量层拆成 49 个 PATCH 全部 202 之后，Pod 仍停在 `Building`，并持续以 ~1.7 MB/s **收和发各一份**（20 秒采样 rx 34.7 MB / tx 34.5 MB）。`tags/list` 404，即镜像还没落地，不是慢，是在搬别的东西；
+> - 现象：分块上传把 3 GiB 增量层拆成 49 个 PATCH 全部 202 之后，Pod 仍停在 `Building`，并持续以 ~1.7 MB/s **收和发各一份**（20 秒采样 rx 34.7 MB / tx 34.5 MB）。`tags/list` 404，即镜像还没落地，不是慢，是在搬别的东西；
 > - 证据来自 `harbor-registry` 的访问日志：`HEAD /v2/library/m5-big/blobs/sha256:7e0a5d42…` → `404 blob unknown`，紧接着 `POST /v2/library/m5-big/blobs/uploads/`，`useragent="go-containerregistry/v0.20.6"`。也就是说 rx≈tx 是在把**基础镜像的层**从 nvcr.io 拉下来再推到 Harbor；
 > - 关键数字：`nvcr.io/nvidia/pytorch:25.08-py3` 共 **76 层、11,039.7 MB**，单层最大 3572.4 MB、2321.3 MB。这与 M4 上 `m4-cred` 失败时的 **69 分钟 / 约 11 GB** 完全吻合——**当年被掐断的根本不是增量层，而是基础镜像层**，增量（那个仓库当时增量很小）早就传完了。之前把锅记在增量上是误判；
 > - 为什么之前没暴露：`remote.Write` 对**同仓库已有**的 blob 只发 HEAD；`m1-verify` 之类仓库早先由别的方式写满了这些层，所以 HEAD 全 200。新建的 `m5-big` / `m5-cred`（后者只有 32 字节增量）仓库是空的，于是每一层都要重新搬。跨注册表不能 `mount`（`nvidia/pytorch` 不在 Harbor 里），Harbor 的 blob 存储是否全局去重不改变协议层的事实——协议上 HEAD 404 就得传；

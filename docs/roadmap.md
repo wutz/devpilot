@@ -163,3 +163,35 @@
 > - 新参数 `--dashboard-bind-address`（空即关闭），Chart 侧 `dashboard.enabled` / `dashboard.bindAddress` / `dashboard.service.*`。`targetPort` 由 `bindAddress` 末尾端口推导（`devpilot.dashboardPort`），`enabled: true` 而地址无端口时**直接渲染失败**，避免 Service 指向一个从未监听的端口；
 > - 镜像构建缺陷：`.dockerignore` 原先只放行 `**/*.go`，`go:embed assets` 在容器里报 `pattern assets: no matching files found`（本地能过是因为本地有文件）。已补 `!internal/dashboard/assets/**`；这个缺陷只会在**发布流水线**上暴露，本地 `go build` 测不出来；
 > - 视觉遵循 `DESIGN.md`（Vercel/Geist）：ink `#171717`、canvas `#fafafa`、hairline `#ebebeb`、6px 控件 / 12px 卡片圆角、等宽大写 eyebrow、扁平描边卡片；`DESIGN.md` 由 `npx getdesign add vercel` 生成后修掉了一行被污染的 `fontWeight` 才让 frontmatter 可解析。
+
+---
+
+## M5 流式保存镜像的可靠传输（M4 实测暴露）
+
+- [x] `devpilot-commit` 按 OCI 分发协议分块上传增量层，并在连接被切断后从注册表确认的偏移续传
+
+> 实测记录（2026-11-12，`devpilot-verify/m4-cred`，registry `cr.dev1.bz1.paratera.com:7443/library`，`devpilot-commit` 旧版本）：
+> - 缺陷：`m4-repo` 的 commit 在 **69 分钟、约 11 GB** 之后以 `PATCH https://…/v2/library/m4-cred/blobs/uploads/…: unexpected status code 400 Bad Request`（nginx 的 HTML 错误页，34m CPU / 23Mi 内存）失败。排除了凭证与查询参数（同一凭证建 session 成功），也排除了 nginx `proxy-body-size`（ Harbor Ingress 上是 `"0"`，即不限）与 registry `maxuploadsize`（未配置）；
+> - 根因是 `go-containerregistry` v0.20 的 `writer.streamBlob` **把整层放进一个 PATCH**（`ContentLength = size`）。11 GB 的增量就是一条挂着一小时的请求，中间任何一跳都会把它掐断；而 `uploadOne` 的重试是从头再来，所以越重的镜像越不可能成功。`remote.Write` 本身反而没问题——它按 digest 发现 blob 已存在就跳过，所以只要先把 blob 传上去，写 manifest 只有几 KB；
+> - 修复：新增 `internal/commit/blob.go` 的 `RegistryUploader`，显式实现 `HEAD`（已有即跳过）/ `POST` 建 session / 分段 `PATCH`（带 `Content-Range: start-end`）/ `GET` 读 `Range` 续传 / `PUT ?digest=` 收尾 / 再 `HEAD` 确认，默认每块 64 MiB（`--upload-chunk-size`，0 关闭并回落到 `remote.Write`）；
+> - 两个协议细节在单测里暴露：① 层流是 `io.NopCloser` 包的普通 reader，**不可 Seek**，所以续传不能靠回头读，正常路径只向前读并保留刚发出的那块，注册表只吃了一半时直接从内存补发（只有注册表回退到本块之前时才要求 Seek，不可 Seek 就明确报错）；② 注册表的 `Location` 允许是**相对路径**（Harbor 每次 PATCH 都这么回），早先原样沿用会让下一个请求没有 scheme，现在统一按注册表 base 解析；
+> - 单测覆盖五条路径：分块边界与请求数、半截被吃后从 `1536` 续传（不是从头）、已存在的 blob 零 PATCH、注册表报不出偏移时明确失败、`ChunkSize=0` 回落到单请求；
+> - 附带重构：`Push` 的 gocyclo 顶到 32（上限 30），拆出 `readBase` / `checkLayerMedia`；`baseDigest`/`baseMedia` 收进 `baseImage` 结构体。
+
+- [x] 目标仓库缺少基础镜像层时，也走分块上传（跨注册表无法 mount，`remote.Write` 会把 3.5 GB 的层塞进一个 PATCH）
+
+> 实测记录（2026-11-12，`devpilot-verify/m5-big`，registry `cr.dev1.bz1.paratera.com:7443/library/m5-big`，`devpilot-commit:m5-1`）：
+> - 现象：分块上传把 3 GiB 增量层拆成 49 个 PATCH 全部 202 之后，Pod 仍停在 `Building`，并持续以 ~1.7 MB/s **收和发各一份**（20 秒采样 rx 34.7 MB / tx 34.5 MB）。`tags/list` 404，即镜像还没落地，不是慢，是在搬别的东西；
+> - 证据来自 `harbor-registry` 的访问日志：`HEAD /v2/library/m5-big/blobs/sha256:7e0a5d42…` → `404 blob unknown`，紧接着 `POST /v2/library/m5-big/blobs/uploads/`，`useragent="go-containerregistry/v0.20.6"`。也就是说 rx≈tx 是在把**基础镜像的层**从 nvcr.io 拉下来再推到 Harbor；
+> - 关键数字：`nvcr.io/nvidia/pytorch:25.08-py3` 共 **76 层、11,039.7 MB**，单层最大 3572.4 MB、2321.3 MB。这与 M4 上 `m4-cred` 失败时的 **69 分钟 / 约 11 GB** 完全吻合——**当年被掐断的根本不是增量层，而是基础镜像层**，增量（那个仓库当时增量很小）早就传完了。之前把锅记在增量上是误判；
+> - 为什么之前没暴露：`remote.Write` 对**同仓库已有**的 blob 只发 HEAD；`m1-verify` 之类仓库早先由别的方式写满了这些层，所以 HEAD 全 200。新建的 `m5-big` / `m5-cred`（后者只有 32 字节增量）仓库是空的，于是每一层都要重新搬。跨注册表不能 `mount`（`nvidia/pytorch` 不在 Harbor 里），Harbor 的 blob 存储是否全局去重不改变协议层的事实——协议上 HEAD 404 就得传；
+> - 修复：`Push` 在写 manifest 之前把**最终镜像的所有层**都交给 `req.Uploader`（新增 `uploadBlobs`），已存在的按 HEAD 跳过，缺的按 64 MiB 分块传输、可续传。这样任一层的失败都只丢一个分块，而不是丢一条 3.5 GB 的请求。
+
+- [x] 端到端实测：空仓库 + 11 GB 基础镜像 + 3 GiB 增量层完整落地
+
+> 实测记录（2026-11-12，`devpilot-verify/m5-big2`，registry `cr.dev1.bz1.paratera.com:7443/library/m5-big2`，`devpilot-commit:m5-2`，devbox `m3-idle`，`consistency: Sync`、`compression: gzip`、`cleanPackageCache: true`）：
+> - 为了逼出最坏路径，目标用了一个**从未写入过**的新仓库，所以 76 个基础层一个也无法 HEAD 命中，必须全部经 Harbor 传一遍，叠加 3 GiB 增量；
+> - 结果：`status.phase = Succeeded`，`Pushed …/library/m5-big2:v1@sha256:f22b085e97795f5d287da3d8d5abb544e1855b5361d137cf4fc05f5d4a470d64`，耗时 **80 分钟**（08:29:50Z → 09:50:05Z）。这正是 M4 上 69 分钟 / 约 11 GB 被 400 掐断的那条路径，现在跑通了；
+> - 回读 registry 的 manifest 复核：**77 层**（76 基础 + 1 增量），压缩后合计 **14,261.9 MB**，末层 **3,222.2 MB**（即那个 3 GiB 增量，与此前 `m5-big` 单独上传的 3,222,209,296 字节吻合）；
+> - 传输形态：基础层按 64 MiB 逐块 PATCH（日志里可见 `offset=67108864 total=3572…`、`offset=103092640 total=…` 这类推进），已存在的层被 HEAD 跳过并打出 `Layer blob already in the repository`。因此断了也只丢一块，而不是丢掉一条 3.5 GB 的请求；
+> - 资源回收正常：提交结束后 build pod 与本次提交专用的临时凭证 `m5-big2-registry` 都已删除，`devpilot-verify-build` 里的 `harbor-push` 保留。

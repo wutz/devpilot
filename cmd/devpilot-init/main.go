@@ -60,6 +60,8 @@ func run(args []string, stderr *os.File) int {
 		sshHostKey  string
 		sshAuthKeys string
 		sshShell    string
+		jupyterPort int
+		jupyterTok  string
 	)
 	fs.StringVar(&installPath, "install", "",
 		"Copy this binary to the given path and exit; used by the init container that populates the shared volume.")
@@ -85,6 +87,10 @@ func run(args []string, stderr *os.File) int {
 		"Path to the authorized_keys file; defaults to <ssh-dir>/authorized_keys.")
 	fs.StringVar(&sshShell, "ssh-shell", "",
 		"Login shell for SSH sessions; empty means /bin/bash.")
+	fs.IntVar(&jupyterPort, "jupyter-port", 0,
+		"Port JupyterLab binds on 0.0.0.0; 0 disables the hosted server.")
+	fs.StringVar(&jupyterTok, "jupyter-token-file", "",
+		"File holding the JupyterLab login token; the server is skipped when it cannot be read.")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -130,6 +136,16 @@ func run(args []string, stderr *os.File) int {
 		}
 	}
 
+	// A nil Jupyter leaves the image to serve its own notebooks; the operator
+	// only sets the flags when spec.access.jupyter asks for the hosted one.
+	var jupyterOptions *initroot.JupyterOptions
+	if jupyterPort > 0 {
+		jupyterOptions = &initroot.JupyterOptions{
+			Port:      int32(jupyterPort),
+			TokenFile: jupyterTok,
+		}
+	}
+
 	code, err := initroot.Boot(initroot.BootOptions{
 		Root:        root,
 		ImageRef:    imageRef,
@@ -139,6 +155,7 @@ func run(args []string, stderr *os.File) int {
 		GracePeriod: gracePeriod,
 		Command:     initroot.Command{Path: argv[0], Args: argv[1:]},
 		SSH:         sshOptions,
+		Jupyter:     jupyterOptions,
 		Logf:        logf,
 	})
 	if err != nil {

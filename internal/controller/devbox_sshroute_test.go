@@ -208,7 +208,7 @@ var _ = Describe("DevBox gateway publishing", func() {
 		Expect(routeConditionReason(stored)).To(Equal("NoAuthorizedKeys"))
 	})
 
-	It("withdraws the route and the Service when the gatewayRef is removed", func() {
+	It("withdraws the route but keeps the Service when the gatewayRef is removed", func() {
 		box := newSSHDevBox("route-withdraw", namespace, testClientKey())
 		box.Spec.Access.SSH.GatewayRef = gatewayRef(gwNamespace)
 		key := createBound(box)
@@ -224,6 +224,27 @@ var _ = Describe("DevBox gateway publishing", func() {
 		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name},
 			&sshgatewayv1alpha1.SSHRoute{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the SSHRoute should be gone, got %v", err)
+
+		// The Service also fronts the devbox's HTTP endpoints, so unpublishing SSH
+		// must not take it away; only a devbox with no access path left has none.
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name}, svc)).To(Succeed())
+		Expect(svc.Spec.Ports).To(HaveLen(1))
+		Expect(svc.Spec.Ports[0].Name).To(Equal(SSHServicePortName))
+	})
+
+	It("removes the Service once nothing needs it", func() {
+		box := newSSHDevBox("route-nosvc", namespace, testClientKey())
+		key := createBound(box)
+
+		stored := &devpilotv1alpha1.DevBox{}
+		Expect(k8sClient.Get(ctx, key, stored)).To(Succeed())
+		stored.Spec.Access.SSH = nil
+		Expect(k8sClient.Update(ctx, stored)).To(Succeed())
+
+		_, err := reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+
 		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name}, &corev1.Service{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the Service should be gone, got %v", err)
 	})

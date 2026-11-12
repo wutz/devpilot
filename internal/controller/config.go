@@ -39,6 +39,26 @@ type Config struct {
 	// DefaultSnapshotClasses maps a root disk StorageClass to the
 	// VolumeSnapshotClass used for online commits.
 	DefaultSnapshotClasses map[string]string
+	// IngressClass names the IngressClass used for the DevBox HTTP endpoints.
+	// Empty disables HTTP exposure.
+	IngressClass string
+	// IngressDomain is the suffix appended to every generated host, e.g.
+	// "dev1.example.com". Empty disables HTTP exposure.
+	IngressDomain string
+	// IngressPort is the port the ingress controller serves HTTPS on. It only
+	// affects the URLs written into status; 443 is the scheme default and is
+	// omitted from them.
+	IngressPort int32
+}
+
+// DefaultIngressPort is the HTTPS port the generated URLs assume when the
+// operator does not override it.
+const DefaultIngressPort int32 = 443
+
+// HTTPExposed reports whether the operator publishes DevBox HTTP endpoints. It
+// needs both a domain to build hosts from and a class to bind them to.
+func (c Config) HTTPExposed() bool {
+	return strings.TrimSpace(c.IngressDomain) != "" && strings.TrimSpace(c.IngressClass) != ""
 }
 
 // ParseSnapshotClassMapping parses "storageClass=snapshotClass,..." into a map.
@@ -100,6 +120,15 @@ func (c Config) Validate() error {
 	var errs []error
 	if strings.TrimSpace(c.InitImage) == "" {
 		errs = append(errs, errors.New("devpilot init image must be set"))
+	}
+	if c.IngressDomain != "" && strings.TrimSpace(c.IngressDomain) != c.IngressDomain {
+		errs = append(errs, errors.New("ingress domain must not have surrounding spaces"))
+	}
+	if c.IngressDomain != "" && strings.ContainsAny(c.IngressDomain, "/: ") {
+		errs = append(errs, fmt.Errorf("ingress domain %q must be a bare DNS suffix such as example.com", c.IngressDomain))
+	}
+	if c.IngressPort < 0 || c.IngressPort > 65535 {
+		errs = append(errs, fmt.Errorf("ingress port %d is out of range", c.IngressPort))
 	}
 	return errors.Join(errs...)
 }

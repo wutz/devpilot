@@ -73,7 +73,7 @@
 
 - [x] 容器内 SSH 服务托管（兼容自带 `sshd` 与内置 Go SSH Server 兜底），持久化 `<devbox>-hostkey` Secret
 - [x] 对接 `sshgateway.wutz.dev` 自动生成 `SSHRoute`（验证 VS Code / Cursor Remote-SSH 端到端连接与端口转发）
-- [ ] JupyterLab 自动托管与自定义 HTTP 端口暴露（生成 Gateway API `HTTPRoute` / Ingress，适配 `bz1-dev1` `:7443` 端口）
+- [x] JupyterLab 自动托管与自定义 HTTP 端口暴露（生成 Gateway API `HTTPRoute` / Ingress，适配 `bz1-dev1` `:7443` 端口）
 - [ ] 抢占式（`Spot`）驱逐检测与 `Interrupted` 状态流转、运行段计费账本（`status.segments[]`）
 - [ ] 闲置自动关机（`idleShutdownMinutes`）与连续停机/中断 15 天超期自动回收（含提前预警 Event 与 `volumetrash` 对接）
 
@@ -94,6 +94,16 @@
 > - 关机再开机后 `Service` 与 `SSHRoute` 原样保留（用户名不被释放、不改变），重新连接在 `StrictHostKeyChecking=yes` 下通过，`hostname` 与登录用户不变；
 > - 环境限制：MetalLB 地址池已耗尽（`no available IPs`），`SSHGateway` 的 `status.addresses` 为空，故 `status.endpoints.ssh` 回落到 Pod 级地址；NodePort `30322` 在网关 Pod 所在节点 `gn-10-243-145-105` 上可达，共享 VIP `10.243.147.247` 上不可达，实测即经该 NodePort 完成；
 > - 集群上 `devpilot-manager-role` 再次需随清单补齐 `services` 与 `sshgateway.wutz.dev/sshgateways,sshroutes` 权限（已 patch，未重新 apply 整份清单）。
+
+> 实测记录（2026-11-12，`devpilot-verify/m3-route`，RTX 5090，manager `devpilot:m3-3` + `devpilot-init:m3-3`）：
+> - 暴露方式选型：集群 Ingress 控制器为 `ingress-nginx`（`LoadBalancer 10.243.147.247`，`8080:30935,7443:30199/TCP`，`--default-ssl-certificate=cert-manager/default-tls`），现有路由统一为 `ingressClassName: nginx` + 仅写 `tls.hosts` 不写 `secretName`；MetalLB 池已耗尽且 Gateway API 被 agentgateway 占用，故选择 `networking.k8s.io/v1 Ingress` 而非 `HTTPRoute`，URL 统一带 `:7443`；
+> - 新增管理参数 `--ingress-class/--ingress-domain/--ingress-port`（本次 `nginx` / `dev1.bz1.paratera.com` / `7443`），三者任一为空即不发布 HTTP；
+> - `access.jupyter.enabled=true` 后控制器生成 `<devbox>-jupyter` Secret（32 字节随机 hex，key `token`，owner reference 指向 DevBox），以 `JUPYTER_TOKEN` 环境变量交给 `devpilot-init`（不进 argv，`/proc/<pid>/cmdline` 无泄漏），挂在 `/run/devpilot-jupyter/token`（该路径在 `pivot_root` 后仍可见）并由 `jupyter lab --no-browser --ip=0.0.0.0 --allow-root` 托管；
+> - 共享接入 `Service/m3-route` 同时承载 `ssh/22`、`jupyter/8888`、`api/3000`，`Ingress/m3-route` 把 `jupyter-m3-route-devpilot-verify` 与 `api-m3-route-devpilot-verify` 两个主机转发到按名引用（named port）的同一 Service，注解 `proxy-body-size=0`、`proxy-read/send-timeout=3600`、`proxy-buffering=off` 以支持长内核会话与 WebSocket；
+> - 实测 `https://jupyter-…:7443/` 返回 302 → `/lab?`，带 `?token=` 登录 200，`/api/status` 返回 JupyterLab 状态 JSON；`https://api-…:7443/` 在容器内 `python3 -m http.server 3000` 起服务后返回 200 与预期正文（未起服务时正确 502）；
+> - `spec.access.ports[]` 走 `+listType=map` + CEL（保留名 `ssh`/`jupyter`、端口号唯一、`maxItems=16`），Webhook 额外拦截 Jupyter 端口与 22 或自定义端口冲突；
+> - `desiredState=Stopped` 后 `Ingress`、`Service`、`<devbox>-jupyter` Secret 均保留，重新开机后主机名与 token 不变，同一 URL 再次返回 200；`specHash` 只纳入 `jupyter` 开关与端口（端口变更替换 Pod，token 轮换不替换）；
+> - 集群上 `devpilot-manager-role` 需随清单补齐 `networking.k8s.io/ingresses` 权限（已 patch），CRD 亦需 `kubectl apply` 更新以带上 `ports[]` 与 Jupyter 校验规则。
 
 ---
 

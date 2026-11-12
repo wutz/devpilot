@@ -70,6 +70,8 @@ spec:
                         default: 8888
                         description: port is the JupyterLab port, 8888 by default.
                         format: int32
+                        maximum: 65535
+                        minimum: 1
                         type: integer
                       tokenSecretRef:
                         description: |-
@@ -104,8 +106,12 @@ spec:
                       description: DevBoxPort is an extra HTTP port.
                       properties:
                         name:
-                          description: name identifies the exposed port.
+                          description: |-
+                            name identifies the exposed port. It becomes the Service port name and the
+                            leftmost label of the public host, so it follows the DNS-1123 label rules.
+                          maxLength: 15
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         port:
                           description: port is the container port.
@@ -114,6 +120,7 @@ spec:
                           minimum: 1
                           type: integer
                         protocol:
+                          default: HTTP
                           description: protocol is the application protocol; HTTP
                             by default.
                           enum:
@@ -124,10 +131,17 @@ spec:
                       - name
                       - port
                       type: object
+                    maxItems: 16
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
                     x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: port names ssh and jupyter are reserved
+                      rule: self.all(p, !(p.name in ['ssh', 'jupyter']))
+                    - message: port numbers must be unique
+                      rule: self.all(p, self.filter(q, q.port == p.port).size() ==
+                        1)
                   ssh:
                     description: ssh configures the in-container SSH server.
                     properties:

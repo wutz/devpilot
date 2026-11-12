@@ -145,6 +145,51 @@ func validateDevBoxSpec(obj *devpilotv1alpha1.DevBox) field.ErrorList {
 				"only persistentVolumeClaim volumes are supported"))
 		}
 	}
+	errs = append(errs, validateAccessPorts(spec.Access)...)
+	return errs
+}
+
+// reservedServicePortNames are the ports the operator reserves on the shared
+// access Service. A spec port reusing one would collide with SSH or JupyterLab.
+var reservedServicePortNames = []string{"ssh", "jupyter"}
+
+// validateAccessPorts rejects port layouts the shared Service cannot express.
+// The schema covers the per-entry rules; only the cross-field ones need a
+// webhook.
+func validateAccessPorts(access devpilotv1alpha1.DevBoxAccess) field.ErrorList {
+	var errs field.ErrorList
+	portsPath := field.NewPath("spec", "access", "ports")
+
+	seen := map[int32]string{}
+	for i, extra := range access.Ports {
+		for _, reserved := range reservedServicePortNames {
+			if extra.Name == reserved {
+				errs = append(errs, field.Forbidden(portsPath.Index(i).Child("name"),
+					fmt.Sprintf("%q is reserved for the operator's own access port", reserved)))
+			}
+		}
+		if other, dup := seen[extra.Port]; dup {
+			errs = append(errs, field.Invalid(portsPath.Index(i).Child("port"), extra.Port,
+				fmt.Sprintf("port %d is already used by %q", extra.Port, other)))
+			continue
+		}
+		seen[extra.Port] = extra.Name
+	}
+
+	if access.Jupyter != nil && access.Jupyter.Enabled {
+		port := access.Jupyter.Port
+		if port == 0 {
+			port = 8888
+		}
+		jupyterPath := field.NewPath("spec", "access", "jupyter", "port")
+		if access.SSH != nil && access.SSH.Enabled && port == 22 {
+			errs = append(errs, field.Invalid(jupyterPath, port, "port 22 is used by the SSH server"))
+		}
+		if other, dup := seen[port]; dup {
+			errs = append(errs, field.Invalid(jupyterPath, port,
+				fmt.Sprintf("port %d is already used by %q", port, other)))
+		}
+	}
 	return errs
 }
 

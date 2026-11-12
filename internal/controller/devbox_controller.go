@@ -102,12 +102,36 @@ func (r *DevBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	result, err := r.reconcileLifecycle(ctx, box)
 	log.V(1).Info("Reconciled DevBox", "phase", box.Status.Phase, "desiredState", box.Spec.DesiredState)
-	// The ledger is settled after the lifecycle wrote the phase, so a segment
-	// closes in the same status patch that moves the devbox to Stopped or
-	// Interrupted.
-	r.settleBilling(box, timeNow())
+
+	// The ledger is settled first, after the lifecycle wrote the phase: a segment
+	// opens as soon as the devbox is Running, so the idle check below judges the
+	// current run rather than an empty ledger, and a segment closes in the same
+	// status patch that moves the devbox to Stopped or Interrupted.
+	now := timeNow()
+	released := false
+	r.settleBilling(box, now)
+
+	// Idle shutdown runs after the pod is observed, so it only stops a devbox
+	// that is actually running. The segment it just opened is closed here as
+	// IdleTimeout, which is why the settle above must not be skipped when the
+	// devbox is shut down on this pass.
+	if stopped, idleErr := r.shutdownIfIdle(ctx, box, now); idleErr != nil {
+		return ctrl.Result{}, idleErr
+	} else if stopped {
+		result = ctrl.Result{RequeueAfter: requeueWhileStarting}
+	} else {
+		released = r.settleRetention(box, now)
+	}
+	if wake := automationWake(box, now); wake > 0 && (result.RequeueAfter == 0 || wake < result.RequeueAfter) {
+		result.RequeueAfter = wake
+	}
 	if statusErr := r.patchStatus(ctx, original, box); statusErr != nil {
 		return result, statusErr
+	}
+	if released {
+		// The countdown is persisted before the devbox goes, so a release that
+		// fails leaves an expired devbox behind instead of one that vanished.
+		return result, r.releaseRetention(ctx, box, now)
 	}
 	return result, err
 }
@@ -329,6 +353,9 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 		box.Status.ScheduledReleaseTime = nil
 		box.Status.InterruptedAt = nil
 		r.clearCondition(box, ConditionPreempted)
+		// Running is the one thing that resets the retention countdown, so the
+		// warnings it produced no longer apply.
+		r.clearCondition(box, ConditionRetentionExpiring)
 		r.setCondition(box, ConditionReady, metav1ConditionTrue, "PodReady", "The devbox is running on "+pod.Spec.NodeName)
 		log.Info("DevBox running", "pod", pod.Name, "node", pod.Spec.NodeName)
 		return ctrl.Result{}, nil

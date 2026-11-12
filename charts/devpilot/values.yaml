@@ -15,6 +15,13 @@ init:
     tag: ""
     pullPolicy: IfNotPresent
 
+retention:
+  # What happens to the root disk of a DevBox that sat out its
+  # spec.rootDisk.retentionDaysAfterStop window: trash hands the claim to the
+  # volumetrash recycler, which holds it for a recovery buffer before deleting
+  # the volume; delete removes the claim together with the DevBox.
+  reclaim: trash
+
 imagePullSecrets: []
 
 nameOverride: ""

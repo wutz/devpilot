@@ -75,7 +75,20 @@
 - [x] 对接 `sshgateway.wutz.dev` 自动生成 `SSHRoute`（验证 VS Code / Cursor Remote-SSH 端到端连接与端口转发）
 - [x] JupyterLab 自动托管与自定义 HTTP 端口暴露（生成 Gateway API `HTTPRoute` / Ingress，适配 `bz1-dev1` `:7443` 端口）
 - [x] 抢占式（`Spot`）驱逐检测与 `Interrupted` 状态流转、运行段计费账本（`status.segments[]`）
-- [ ] 闲置自动关机（`idleShutdownMinutes`）与连续停机/中断 15 天超期自动回收（含提前预警 Event 与 `volumetrash` 对接）
+- [x] 闲置自动关机（`idleShutdownMinutes`）与连续停机/中断 15 天超期自动回收（含提前预警 Event 与 `volumetrash` 对接）
+
+> 实测记录（2026-11-12，`devpilot-verify/m3-idle` + `m3-retention`，RTX 5090，manager `devpilot:m3-7`）：
+> - 新参数 `--retention-reclaim=trash|delete`（Chart 值 `retention.reclaim`，默认 `trash`），非法值在启动时由 `Config.Validate` 拒绝；
+> - `lifecycle.idleShutdownMinutes: 1` 的 DevBox 开机后，最后一次活动取 `devpilot.wutz.dev/last-active` 心跳与当前打开运行段的**较晚者**；超过阈值后控制器在同一次 reconcile 里关闭运行段为 `endReason=IdleTimeout`、写 `desiredState=Stopped`、`phase=Stopping`、`Ready=False/IdleTimeout` 并发出 `Normal IdleShutdown`，随后一次 reconcile 删除 Pod 落到 `Stopped`；
+> - 实测账本：`segments[0]` `05:10:14Z → 05:11:16Z`、`billedSeconds=62`、`cost=0.048222`、`totalCost=0.048222`（`2.80 × 62/3600` 定点截断），segment 只关闭一次，Pod 删除后未再拉起；
+> - 连续停机计时以 `status.nonRunningSince` 为基准，`scheduledReleaseTime = nonRunningSince + retentionDaysAfterStop × 24h`；`retentionDaysAfterStop: 1` 时开机即进入 `Ready=False/Stopped` 并立刻给出 `Warning ShutdownRetentionExpiring`（`ExpiringIn24h`）；
+> - 把 `retentionDaysAfterStop` 改为 15 并回拨 `nonRunningSince` 到「距回收 60h」「距回收 10h」，条件分别变为 `RetentionExpiring=True/ExpiringIn72h`、`ExpiringIn24h` 且各只发一次 Event（同一阈值内重复 reconcile 静默）；再回拨到「距回收 14h」时条件被清除；
+> - 回拨到「已超期 1 天」后，控制器关闭运行段为 `endReason=Released`、发 `Warning Released`、给 root 盘 PVC 打上 `volumetrash.wutz.dev/expire-at=20261112T050849Z`（RFC 3339 的冒号在 label 值里非法，故用紧凑布局）并**摘掉 owner reference**（否则 GC 会连 recycler 要保留的卷一起删），随后删除 DevBox；实测 PVC 仍在且 `Bound`，owner 为空；
+> - `--retention-reclaim=delete` 由 envtest 覆盖：PVC 带 `deletionTimestamp` 且不打 `expire-at` 标签（envtest 无卷控制器，`pvc-protection` 会一直挂住，故以删除时间戳为证据）；
+> - 断机/中断共用同一计时：`Interrupted` 期间不清 `nonRunningSince`，只有回到 `Running` 才清空 `nonRunningSince`、`scheduledReleaseTime` 与 `RetentionExpiring` 条件；
+> - 每次 reconcile 的唤醒间隔取「下一个阈值」并被 `1h` 上限截断，集群里大量闲置 DevBox 不会变成轮询；
+> - 实测暴露并修复一个缺陷：账本结算原本排在闲置判定之后，心跳过期（上一轮遗留）的 DevBox 在第一次看到 `Running` 的同一次 reconcile 里就被关机，**导致 `segments` 为空、`totalCost` 恒为 `0.00`**（即闲置关机一分不记）；改为先 `settleBilling` 再判定闲置，并补了 envtest 回归用例（断言 `endReason=IdleTimeout`、`billedSeconds>=600`、`totalCost` 非零）；
+> - `devpilot-manager-role` 覆盖所用权限：`persistentvolumeclaims` 的 `update`、`devboxes` 的 `delete`、`events` 的 `create` 均可为（`kubectl auth can-i` 三项均为 `yes`），本次无需改 RBAC。
 
 > 实测记录（2026-11-12，`devpilot-verify/m3-ssh-verify`，RTX 5090，`devpilot-init:m3-2`）：
 > - `<devbox>-hostkey` Secret 在 Pod 之前创建，含 420 字节 OpenSSH 私钥、对应公钥与 `authorized_keys`，owner reference 指向 `DevBox`；

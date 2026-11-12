@@ -78,6 +78,7 @@ func main() {
 	var ingressClass string
 	var ingressDomain string
 	var ingressPort int
+	var retentionReclaim string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -113,6 +114,9 @@ func main() {
 		"DNS suffix for DevBox HTTP endpoints, e.g. dev1.example.com. Empty disables HTTP exposure.")
 	flag.IntVar(&ingressPort, "ingress-port", int(controller.DefaultIngressPort),
 		"HTTPS port the ingress controller serves; used only for the URLs reported in status.")
+	flag.StringVar(&retentionReclaim, "retention-reclaim", controller.ReclaimTrash,
+		"What happens to a root disk whose DevBox sat out its retention window: "+
+			"trash hands it to the volumetrash recycler, delete removes it at once.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -134,6 +138,7 @@ func main() {
 		IngressClass:           ingressClass,
 		IngressDomain:          ingressDomain,
 		IngressPort:            int32(ingressPort),
+		RetentionReclaim:       retentionReclaim,
 	}
 	if err := operatorConfig.Validate(); err != nil {
 		setupLog.Error(err, "Invalid operator configuration")

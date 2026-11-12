@@ -1,0 +1,61 @@
+{{- if and .Values.rbac.create .Values.rbac.memberRoles }}
+{{- /*
+  These two ClusterRoles are aggregated into project members by the
+  workspace.wutz.dev project operator, which selects them by label. They grant
+  only the devpilot API; reading logs and opening a console stays with the
+  project role.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: devpilot-member-edit
+  labels:
+    {{- include "devpilot.labels" . | nindent 4 }}
+    workspace.wutz.dev/aggregate-to-member: edit
+rules:
+  - apiGroups:
+      - devpilot.wutz.dev
+    resources:
+      - devboxes
+      - devboxcommits
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - devpilot.wutz.dev
+    resources:
+      - devboxes/status
+      - devboxcommits/status
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: devpilot-member-view
+  labels:
+    {{- include "devpilot.labels" . | nindent 4 }}
+    workspace.wutz.dev/aggregate-to-member: view
+rules:
+  - apiGroups:
+      - devpilot.wutz.dev
+    resources:
+      - devboxes
+      - devboxcommits
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - devpilot.wutz.dev
+    resources:
+      - devboxes/status
+      - devboxcommits/status
+    verbs:
+      - get
+{{- end }}

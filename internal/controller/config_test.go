@@ -147,3 +147,33 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatal("Validate() without init image returned nil error, want error")
 	}
 }
+
+func TestConfigBuildNamespaceSuffix(t *testing.T) {
+	t.Parallel()
+
+	if got := (Config{}).BuildNamespaceSuffixMode(); got != "" {
+		t.Fatalf("BuildNamespaceSuffixMode() = %q, want empty when isolation is off", got)
+	}
+	if got := (Config{BuildNamespaceSuffix: "  "}).BuildNamespaceSuffixMode(); got != "" {
+		t.Fatalf("BuildNamespaceSuffixMode() = %q, want empty for blank input", got)
+	}
+	if got := (Config{BuildNamespaceSuffix: BuildNamespaceSuffixDefault}).BuildNamespaceSuffixMode(); got != BuildNamespaceSuffixDefault {
+		t.Fatalf("BuildNamespaceSuffixMode() = %q, want %q", got, BuildNamespaceSuffixDefault)
+	}
+
+	base := Config{InitImage: "ghcr.io/wutz/devpilot-init:v0.1.0"}
+	for _, suffix := range []string{BuildNamespaceSuffixDefault, "-ci", "build"} {
+		withSuffix := base
+		withSuffix.BuildNamespaceSuffix = suffix
+		if err := withSuffix.Validate(); err != nil {
+			t.Fatalf("Validate() with suffix %q returned unexpected error: %v", suffix, err)
+		}
+	}
+	for _, suffix := range []string{"-build/extra", " build", "foo:bar"} {
+		withSuffix := base
+		withSuffix.BuildNamespaceSuffix = suffix
+		if err := withSuffix.Validate(); err == nil {
+			t.Fatalf("Validate() with suffix %q returned nil error, want error", suffix)
+		}
+	}
+}

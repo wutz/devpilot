@@ -1,0 +1,28 @@
+# Read-only counterpart of devpilot-member-edit, aggregated into project
+# members by the workspace.wutz.dev project operator. A viewer can watch a
+# devbox and the progress of its image commits, and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: devpilot
+    app.kubernetes.io/managed-by: kustomize
+    workspace.wutz.dev/aggregate-to-member: view
+  name: devpilot-member-view
+rules:
+- apiGroups:
+  - devpilot.wutz.dev
+  resources:
+  - devboxes
+  - devboxcommits
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - devpilot.wutz.dev
+  resources:
+  - devboxes/status
+  - devboxcommits/status
+  verbs:
+  - get

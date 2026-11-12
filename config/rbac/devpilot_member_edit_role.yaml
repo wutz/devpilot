@@ -1,0 +1,37 @@
+# Aggregated into every project member by the workspace.wutz.dev project
+# operator: the workspace-edit ClusterRole selects ClusterRoles carrying the
+# label below, so a project member can manage their own DevBoxes without an
+# extra binding.
+#
+# This role grants only the devpilot API. Reading pod logs, listing pods and
+# opening a console are the project role's business, so the two do not fight
+# over the same verbs in the same namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: devpilot
+    app.kubernetes.io/managed-by: kustomize
+    workspace.wutz.dev/aggregate-to-member: edit
+  name: devpilot-member-edit
+rules:
+- apiGroups:
+  - devpilot.wutz.dev
+  resources:
+  - devboxes
+  - devboxcommits
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - devpilot.wutz.dev
+  resources:
+  - devboxes/status
+  - devboxcommits/status
+  verbs:
+  - get

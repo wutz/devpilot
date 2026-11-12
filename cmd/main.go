@@ -75,6 +75,9 @@ func main() {
 	var commitImage string
 	var registrySecret string
 	var snapshotClassMapping string
+	var ingressClass string
+	var ingressDomain string
+	var ingressPort int
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -104,6 +107,12 @@ func main() {
 		"Fully qualified reference of the devpilot-commit image that DevBoxCommit build Jobs run.")
 	flag.StringVar(&registrySecret, "devpilot-registry-secret", "",
 		"Name of a docker config secret in the build namespace used to push committed images.")
+	flag.StringVar(&ingressClass, "ingress-class", "",
+		"IngressClass for DevBox HTTP endpoints, e.g. nginx. Empty disables HTTP exposure.")
+	flag.StringVar(&ingressDomain, "ingress-domain", "",
+		"DNS suffix for DevBox HTTP endpoints, e.g. dev1.example.com. Empty disables HTTP exposure.")
+	flag.IntVar(&ingressPort, "ingress-port", int(controller.DefaultIngressPort),
+		"HTTPS port the ingress controller serves; used only for the URLs reported in status.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -122,6 +131,9 @@ func main() {
 		CommitImage:            commitImage,
 		RegistrySecret:         registrySecret,
 		DefaultSnapshotClasses: snapshotClasses,
+		IngressClass:           ingressClass,
+		IngressDomain:          ingressDomain,
+		IngressPort:            int32(ingressPort),
 	}
 	if err := operatorConfig.Validate(); err != nil {
 		setupLog.Error(err, "Invalid operator configuration")

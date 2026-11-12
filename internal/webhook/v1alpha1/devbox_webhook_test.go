@@ -33,6 +33,8 @@ const (
 	testPinnedDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	// testOtherImage is a base image that differs from the pinned one.
 	testOtherImage = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+	// testPortName is the name the access-port specs publish.
+	testPortName = "api"
 )
 
 // newDevBox returns a minimal valid DevBox for the validator tests.
@@ -126,6 +128,52 @@ var _ = Describe("DevBox Webhook", func() {
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("persistentVolumeClaim"))
+		})
+
+		// The shared access Service carries these names, so a spec port that
+		// reuses one would collide with SSH or JupyterLab.
+		It("rejects a port named after an operator port", func() {
+			obj.Spec.Access.Ports = []devpilotv1alpha1.DevBoxPort{{Name: "jupyter", Port: 3000}}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(`"jupyter" is reserved`))
+		})
+
+		It("rejects two ports on one number", func() {
+			obj.Spec.Access.Ports = []devpilotv1alpha1.DevBoxPort{
+				{Name: testPortName, Port: 3000},
+				{Name: "web", Port: 3000},
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("port 3000 is already used by \"api\""))
+		})
+
+		It("rejects JupyterLab on the SSH port", func() {
+			obj.Spec.Access.SSH = &devpilotv1alpha1.SSHAccess{Enabled: true}
+			obj.Spec.Access.Jupyter = &devpilotv1alpha1.JupyterAccess{Enabled: true, Port: 22}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("port 22 is used by the SSH server"))
+		})
+
+		It("rejects JupyterLab on a port the spec already exposes", func() {
+			obj.Spec.Access.Jupyter = &devpilotv1alpha1.JupyterAccess{Enabled: true, Port: 3000}
+			obj.Spec.Access.Ports = []devpilotv1alpha1.DevBoxPort{{Name: testPortName, Port: 3000}}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("port 3000 is already used by \"api\""))
+		})
+
+		It("admits a distinct set of access ports", func() {
+			obj.Spec.Access.SSH = &devpilotv1alpha1.SSHAccess{Enabled: true}
+			obj.Spec.Access.Jupyter = &devpilotv1alpha1.JupyterAccess{Enabled: true}
+			obj.Spec.Access.Ports = []devpilotv1alpha1.DevBoxPort{
+				{Name: testPortName, Port: 3000, Protocol: "HTTP"},
+				{Name: "inference", Port: 50051, Protocol: "GRPC"},
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 

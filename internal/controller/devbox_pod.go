@@ -343,8 +343,31 @@ func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, rebase bool, en
 				Drop: []corev1.Capability{capabilityAll},
 			},
 		},
+		// Advertise the access ports so `kubectl describe pod` and any tooling
+		// reading the pod spec see what the devbox serves, matching the Service.
+		Ports:        containerPorts(box),
 		VolumeMounts: volumeMounts(box),
 	}
+}
+
+// containerPorts lists the ports the container listens on for each access path.
+func containerPorts(box *devpilotv1alpha1.DevBox) []corev1.ContainerPort {
+	ports := make([]corev1.ContainerPort, 0, 2+len(box.Spec.Access.Ports))
+	if sshEnabled(box) {
+		ports = append(ports, containerPort(SSHServicePortName, SSHPort))
+	}
+	if jupyterEnabled(box) {
+		ports = append(ports, containerPort(JupyterServicePortName, jupyterPort(box)))
+	}
+	for _, extra := range box.Spec.Access.Ports {
+		ports = append(ports, containerPort(extra.Name, extra.Port))
+	}
+	return ports
+}
+
+// containerPort renders one container port with the shared TCP protocol.
+func containerPort(name string, port int32) corev1.ContainerPort {
+	return corev1.ContainerPort{Name: name, ContainerPort: port, Protocol: corev1.ProtocolTCP}
 }
 
 // volumeMounts lists the main container's mounts. The SSH keys are mounted
@@ -359,6 +382,13 @@ func volumeMounts(box *devpilotv1alpha1.DevBox) []corev1.VolumeMount {
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      SSHVolumeName,
 			MountPath: SSHMountPath,
+			ReadOnly:  true,
+		})
+	}
+	if jupyterEnabled(box) {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      JupyterVolumeName,
+			MountPath: JupyterMountPath,
 			ReadOnly:  true,
 		})
 	}
@@ -416,6 +446,9 @@ func devBoxCommand(box *devpilotv1alpha1.DevBox, info ImageInfo, rebase bool) []
 	if sshEnabled(box) {
 		argv = append(argv, sshCommandFlags()...)
 	}
+	if jupyterEnabled(box) {
+		argv = append(argv, jupyterCommandFlags(box)...)
+	}
 	argv = append(argv, "--")
 	return append(argv, user...)
 }
@@ -448,11 +481,15 @@ func volumes(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, sh
 	if sshEnabled(box) {
 		vols = append(vols, sshVolume(box))
 	}
+	if jupyterEnabled(box) {
+		vols = append(vols, jupyterVolume(box))
+	}
 	seen := map[string]struct{}{
 		InitVolumeName:     {},
 		RootDiskVolumeName: {},
 		ShmVolumeName:      {},
 		SSHVolumeName:      {},
+		JupyterVolumeName:  {},
 	}
 	for _, extra := range box.Spec.Volumes {
 		if _, dup := seen[extra.Name]; dup || extra.PersistentVolumeClaim == nil {
@@ -505,6 +542,18 @@ func (r *DevBoxReconciler) setCondition(box *devpilotv1alpha1.DevBox, condType s
 		ObservedGeneration: box.Generation,
 		LastTransitionTime: now,
 	})
+}
+
+// clearCondition drops a condition that no longer applies, so a spec that turns
+// a feature off does not leave a stale verdict behind.
+func (r *DevBoxReconciler) clearCondition(box *devpilotv1alpha1.DevBox, condType string) {
+	kept := box.Status.Conditions[:0]
+	for _, cond := range box.Status.Conditions {
+		if cond.Type != condType {
+			kept = append(kept, cond)
+		}
+	}
+	box.Status.Conditions = kept
 }
 
 // patchStatus writes the status subresource, merging from the pre-reconcile

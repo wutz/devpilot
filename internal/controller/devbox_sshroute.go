@@ -28,7 +28,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -81,17 +80,14 @@ func gatewayNamespace(ref *devpilotv1alpha1.NamespacedName) string {
 }
 
 // ensureSSHAccess publishes the devbox on its gateway, or withdraws it when the
-// gatewayRef is gone. The Service is what the gateway resolves the backend
-// through: it is named after the DevBox because the operator finds the host key
-// of a backend at <service>-hostkey, and <devbox>-hostkey is the Secret the
-// devbox already keeps.
+// gatewayRef is gone. The Service the gateway resolves the backend through is
+// the shared access Service: it is named after the DevBox because the operator
+// finds the host key of a backend at <service>-hostkey, and <devbox>-hostkey is
+// the Secret the devbox already keeps.
 func (r *DevBoxReconciler) ensureSSHAccess(ctx context.Context, box *devpilotv1alpha1.DevBox) error {
 	ref := sshGatewayRef(box)
 	if ref == nil {
 		return r.withdrawSSHAccess(ctx, box)
-	}
-	if err := r.ensureSSHService(ctx, box); err != nil {
-		return err
 	}
 	route, err := r.ensureSSHRoute(ctx, box, ref)
 	if err != nil {
@@ -101,9 +97,10 @@ func (r *DevBoxReconciler) ensureSSHAccess(ctx context.Context, box *devpilotv1a
 	return nil
 }
 
-// withdrawSSHAccess removes what a previous gatewayRef left behind. The objects
-// carry owner references, so only a DevBox that outlives the removal of its
-// gatewayRef needs this.
+// withdrawSSHAccess removes the route a previous gatewayRef left behind. The
+// object carries an owner reference, so only a DevBox that outlives the removal
+// of its gatewayRef needs this. The Service stays: it also fronts the devbox's
+// HTTP endpoints, and ensureAccessService decides when it goes.
 func (r *DevBoxReconciler) withdrawSSHAccess(ctx context.Context, box *devpilotv1alpha1.DevBox) error {
 	log := logf.FromContext(ctx)
 	key := client.ObjectKey{Namespace: box.Namespace, Name: box.Name}
@@ -120,84 +117,7 @@ func (r *DevBoxReconciler) withdrawSSHAccess(ctx context.Context, box *devpilotv
 	default:
 		return fmt.Errorf("get SSHRoute %s: %w", key.Name, err)
 	}
-
-	svc := &corev1.Service{}
-	switch err := r.Get(ctx, key, svc); {
-	case err == nil:
-		// Only the operator's own Service is removed: one the user created under
-		// the same name is theirs, and deleting it would take their traffic.
-		if svc.Labels[LabelManagedBy] != ValueManagedBy {
-			return nil
-		}
-		if delErr := r.Delete(ctx, svc); delErr != nil && !isNotFound(delErr) {
-			return fmt.Errorf("delete service %s: %w", svc.Name, delErr)
-		}
-		log.Info("Deleted SSH service", "service", svc.Name)
-	case isNotFound(err):
-	default:
-		return fmt.Errorf("get service %s: %w", key.Name, err)
-	}
 	return nil
-}
-
-// ensureSSHService keeps the Service the gateway forwards to. It selects the
-// pod by the DevBox label, so it follows the pod across replacements.
-func (r *DevBoxReconciler) ensureSSHService(ctx context.Context, box *devpilotv1alpha1.DevBox) error {
-	log := logf.FromContext(ctx)
-	wanted := sshService(box)
-
-	existing := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(wanted), existing)
-	if isNotFound(err) {
-		if ownerErr := ctrlSetOwner(wanted, box, r.Scheme); ownerErr != nil {
-			return fmt.Errorf("set owner reference on service %s: %w", wanted.Name, ownerErr)
-		}
-		if createErr := r.Create(ctx, wanted); createErr != nil && !isAlreadyExists(createErr) {
-			return fmt.Errorf("create service %s: %w", wanted.Name, createErr)
-		}
-		log.Info("Created SSH service", "service", wanted.Name)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("get service %s: %w", wanted.Name, err)
-	}
-	if existing.Labels[LabelManagedBy] != ValueManagedBy {
-		// A Service the operator did not create is the user's: leaving it alone
-		// is the only safe answer, and the gateway reports the missing host key
-		// on the route if it does not match.
-		return nil
-	}
-	if equality.Semantic.DeepEqual(existing.Spec.Selector, wanted.Spec.Selector) &&
-		equality.Semantic.DeepEqual(existing.Spec.Ports, wanted.Spec.Ports) {
-		return nil
-	}
-	existing.Spec.Selector = wanted.Spec.Selector
-	existing.Spec.Ports = wanted.Spec.Ports
-	if updateErr := r.Update(ctx, existing); updateErr != nil {
-		return fmt.Errorf("update service %s: %w", wanted.Name, updateErr)
-	}
-	log.Info("Updated SSH service", "service", wanted.Name)
-	return nil
-}
-
-// sshService is the Service that fronts the devbox SSH server.
-func sshService(box *devpilotv1alpha1.DevBox) *corev1.Service {
-	return &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      box.Name,
-			Namespace: box.Namespace,
-			Labels:    map[string]string{LabelManagedBy: ValueManagedBy, LabelDevBoxName: box.Name},
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{LabelDevBoxName: box.Name},
-			Ports: []corev1.ServicePort{{
-				Name:       SSHServicePortName,
-				Port:       SSHPort,
-				TargetPort: intstr.FromInt32(SSHPort),
-				Protocol:   corev1.ProtocolTCP,
-			}},
-		},
-	}
 }
 
 // ensureSSHRoute creates or updates the route that forwards a gateway username

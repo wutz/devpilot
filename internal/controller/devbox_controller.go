@@ -51,6 +51,7 @@ type DevBoxReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sshgateway.wutz.dev,resources=sshroutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sshgateway.wutz.dev,resources=sshgateways,verbs=get;list;watch
 
@@ -102,11 +103,20 @@ func (r *DevBoxReconciler) reconcileLifecycle(ctx context.Context, box *devpilot
 		box.Status.RootDiskPVC = pvc.Name
 	}
 
-	// The Service and the gateway route outlive a stop: the gateway claims the
-	// username for as long as the route exists, so keeping them means a user's
-	// SSH config does not change when the devbox is shut down and started again.
+	// The access Service, the gateway route and the Ingress outlive a stop: the
+	// gateway claims the username for as long as the route exists, and a host
+	// stays the devbox's, so keeping all three means nothing in a user's SSH
+	// config or browser changes when the devbox is shut down and started again.
+	if err := r.ensureAccessService(ctx, box); err != nil {
+		r.setFailed(ctx, box, "AccessServiceFailed", err)
+		return ctrl.Result{}, err
+	}
 	if err := r.ensureSSHAccess(ctx, box); err != nil {
 		r.setFailed(ctx, box, "SSHRouteFailed", err)
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureHTTPAccess(ctx, box); err != nil {
+		r.setFailed(ctx, box, "HTTPAccessFailed", err)
 		return ctrl.Result{}, err
 	}
 
@@ -180,13 +190,18 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 	// image pull without ever landing in the spec hash.
 	rebase := box.Status.PendingRebaseImage != ""
 
-	// The host key secret must exist before the pod starts, because the pod
-	// mounts it and a missing volume keeps the container in ContainerCreating.
+	// The host key and the Jupyter token must exist before the pod starts,
+	// because the pod mounts them and a missing volume keeps the container in
+	// ContainerCreating.
 	if sshEnabled(box) {
 		if _, err := r.ensureSSHSecret(ctx, box); err != nil {
 			r.setFailed(ctx, box, "SSHKeyFailed", err)
 			return ctrl.Result{}, err
 		}
+	}
+	if err := r.ensureJupyterSecret(ctx, box); err != nil {
+		r.setFailed(ctx, box, "JupyterTokenFailed", err)
+		return ctrl.Result{}, err
 	}
 
 	desired, err := r.buildPod(box, pvc, info, rebase)
@@ -262,6 +277,10 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 				box.Status.Endpoints.SSH = viaGateway
 			}
 		}
+		// The HTTP endpoints come from the operator's own configuration and the
+		// spec, so they need no lookup; a devbox with no public route keeps them
+		// empty rather than advertising a host nothing serves.
+		box.Status.Endpoints.Jupyter, box.Status.Endpoints.Ports = r.httpEndpoints(box)
 		box.Status.StoppedAt = nil
 		box.Status.NonRunningSince = nil
 		box.Status.ScheduledReleaseTime = nil

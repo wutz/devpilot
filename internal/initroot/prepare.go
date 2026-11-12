@@ -65,6 +65,10 @@ type BootOptions struct {
 	// Nil leaves the container without a built-in server, which is right when
 	// the image runs its own sshd or the user asked for no SSH access.
 	SSH *SSHOptions
+	// Jupyter hosts JupyterLab once the persistent root is in place. Nil leaves
+	// the container without one, which is what an image without JupyterLab
+	// installed or a devbox that asked for none needs.
+	Jupyter *JupyterOptions
 	// Logf receives lifecycle messages; nil discards them.
 	Logf LogFunc
 
@@ -165,14 +169,17 @@ func Boot(opts BootOptions) (int, error) {
 		return opts.SyncFn()
 	}
 
-	// SSH comes up before the managed command: a session started in the first
-	// seconds after the pod is ready must find the persistent root, not the
-	// image's empty one. Cancelling on return closes the listener without
-	// waiting for sessions to finish.
-	sshCtx, stopSSH := context.WithCancel(context.Background())
-	defer stopSSH()
+	// SSH and JupyterLab come up before the managed command: a session started
+	// in the first seconds after the pod is ready must find the persistent root,
+	// not the image's empty one. Cancelling on return closes the listener and
+	// stops the notebook server without waiting for sessions to finish.
+	accessCtx, stopAccess := context.WithCancel(context.Background())
+	defer stopAccess()
 	if opts.SSH != nil {
-		startSSH(sshCtx, *opts.SSH, opts.logf)
+		startSSH(accessCtx, *opts.SSH, opts.logf)
+	}
+	if opts.Jupyter != nil {
+		startJupyter(accessCtx, *opts.Jupyter, opts.logf)
 	}
 
 	code, runErr := Run(opts.Command, opts.Starter, ShutdownConfig{

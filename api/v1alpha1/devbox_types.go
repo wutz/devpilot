@@ -251,6 +251,9 @@ type DevBoxAccess struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(p, !(p.name in ['ssh', 'jupyter']))",message="port names ssh and jupyter are reserved"
+	// +kubebuilder:validation:XValidation:rule="self.all(p, self.filter(q, q.port == p.port).size() == 1)",message="port numbers must be unique"
 	Ports []DevBoxPort `json:"ports,omitempty"`
 }
 
@@ -289,6 +292,8 @@ type JupyterAccess struct {
 	// port is the JupyterLab port, 8888 by default.
 	// +optional
 	// +kubebuilder:default=8888
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
 
 	// tokenSecretRef points at an existing token secret; when empty the operator
@@ -299,8 +304,11 @@ type JupyterAccess struct {
 
 // DevBoxPort is an extra HTTP port.
 type DevBoxPort struct {
-	// name identifies the exposed port.
+	// name identifies the exposed port. It becomes the Service port name and the
+	// leftmost label of the public host, so it follows the DNS-1123 label rules.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=15
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// port is the container port.
@@ -310,6 +318,7 @@ type DevBoxPort struct {
 
 	// protocol is the application protocol; HTTP by default.
 	// +optional
+	// +kubebuilder:default=HTTP
 	// +kubebuilder:validation:Enum=HTTP;GRPC
 	Protocol string `json:"protocol,omitempty"`
 }

@@ -273,6 +273,11 @@ func specHash(box *devpilotv1alpha1.DevBox, pvcName string, info ImageInfo) (str
 		// authorized_keys is read from the mounted secret per connection, so
 		// editing the list must not replace a running pod.
 		SSH bool
+		// Jupyter records whether the server runs and on which port. The port is
+		// a flag devpilot-init reads once, so changing it replaces the pod; the
+		// token is read from the mounted secret, so a new one does not.
+		Jupyter     bool
+		JupyterPort int32
 	}{
 		// ImageRef rather than spec.image: a pending rebase starts the pod from
 		// the committed image before spec.image is updated to match.
@@ -291,6 +296,8 @@ func specHash(box *devpilotv1alpha1.DevBox, pvcName string, info ImageInfo) (str
 		InitImage:   "",
 		PVC:         pvcName,
 		SSH:         sshEnabled(box),
+		Jupyter:     jupyterEnabled(box),
+		JupyterPort: jupyterPort(box),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

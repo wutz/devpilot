@@ -11,7 +11,16 @@ image:
 # chroot/pivot_root and PID 1 supervision. It must be a static binary image.
 init:
   image:
-    repository: ghcr.io/wutz/devpilot
+    repository: ghcr.io/wutz/devpilot-init
+    tag: ""
+    pullPolicy: IfNotPresent
+
+# Image the DevBoxCommit build Jobs run. It streams the increment layer from
+# the root disk into the registry, so it must be reachable from the build
+# namespace and be able to write to the registry named in the push secret.
+commit:
+  image:
+    repository: ghcr.io/wutz/devpilot-commit
     tag: ""
     pullPolicy: IfNotPresent
 

@@ -47,6 +47,20 @@ DevBox (devpilot.wutz.dev/v1alpha1)                DevBoxCommit (devpilot.wutz.d
 - [接入体系与安全边界](docs/access-and-security.md) — SSH 直连、Jupyter/Web 路由（端口 `7443`）、最小权限 `SecurityContext` 与凭证隔离
 - [演进路线图](docs/roadmap.md) — M0–M4 阶段划分与集群端到端验收标准
 
+## 发布与安装
+
+打上 `v*` 标签即触发发布流水线，产出三个多架构镜像（`linux/amd64`、`linux/arm64`）和一个 OCI Helm Chart：
+
+- `ghcr.io/wutz/devpilot` — 控制器管理器
+- `ghcr.io/wutz/devpilot-init` — 注入 DevBox 的切根 / PID 1 辅助镜像
+- `ghcr.io/wutz/devpilot-commit` — `DevBoxCommit` 构建 Job 运行的流式镜像构建器
+- `oci://ghcr.io/wutz/charts/devpilot` — 部署 Chart（镜像 tag 默认跟随 Chart 的 `appVersion`）
+
+```bash
+helm install devpilot oci://ghcr.io/wutz/charts/devpilot \
+  --namespace devpilot-system --create-namespace --version <version>
+```
+
 ## 示例清单
 
 - [PyTorch 开发机示例](deploy/examples/devbox-pytorch.yaml)

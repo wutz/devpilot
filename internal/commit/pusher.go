@@ -104,11 +104,11 @@ type PushResult struct {
 
 // Push builds the increment layer and appends it to the base image manifest.
 //
-// Nothing from the base image is downloaded: the manifest and config are a few
-// kilobytes over HTTPS, and the existing layer blobs are referenced by digest.
-// The registry mounts them into the destination repository itself when it can,
-// which is what keeps a commit of a 30 GB PyTorch image down to the size of the
-// user's own changes.
+// Base layer blobs are already in the registry when an earlier commit used the
+// same base, and they are then only referenced by digest. A repository that has
+// never been written to lacks them, and layer blobs cannot be mounted across
+// registries, so those are transferred once with the caller's uploader; see
+// uploadBlobs.
 func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 	if req.BaseReference == "" {
 		return nil, fmt.Errorf("base image reference is required")
@@ -217,10 +217,8 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 		return nil, fmt.Errorf("parse destination repository %q: %w", req.Repository, err)
 	}
 	if req.Uploader != nil {
-		// remote.Write skips a blob it finds by digest, so uploading it here
-		// first is what keeps the manifest write to a few kilobytes.
-		if err := req.Uploader.Upload(ctx, req.Repository, layer); err != nil {
-			return nil, fmt.Errorf("upload the increment layer to %s: %w", req.Repository, err)
+		if err := uploadBlobs(ctx, req, image); err != nil {
+			return nil, err
 		}
 	}
 	for _, tag := range req.Tags {
@@ -292,6 +290,33 @@ func checkLayerMedia(docker bool, media types.MediaType, ref name.Reference, com
 	}
 	return fmt.Errorf("base image %s uses a docker manifest, which cannot carry a %s layer; commit with gzip compression",
 		ref, compression)
+}
+
+// uploadBlobs sends every blob of the finished image before the manifest.
+//
+// remote.Write skips a blob it finds by digest, so whatever lands here costs
+// only a HEAD later. That matters because a destination repository starts empty
+// even when the base image is already in the same registry: cross-repository
+// mounts only work within one registry, and a base on nvcr.io cannot be mounted
+// into Harbor at all. remote.Write would then stream each missing layer in a
+// single PATCH — the 3.5 GB and 2.3 GB layers of the PyTorch base among them —
+// which is what the registry proxy cut off after ~11 GB in the M4 verification.
+func uploadBlobs(ctx context.Context, req PushRequest, image v1.Image) error {
+	layers, err := image.Layers()
+	if err != nil {
+		return fmt.Errorf("read image layers: %w", err)
+	}
+	for i, l := range layers {
+		digest, err := l.Digest()
+		if err != nil {
+			return fmt.Errorf("read layer %d digest: %w", i, err)
+		}
+		if err := req.Uploader.Upload(ctx, req.Repository, l); err != nil {
+			return fmt.Errorf("upload layer %d of %d (%s) to %s: %w",
+				i+1, len(layers), digest.String(), req.Repository, err)
+		}
+	}
+	return nil
 }
 
 // applyChanges clones the base config and overlays the requested metadata.

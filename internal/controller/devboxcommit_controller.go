@@ -62,6 +62,7 @@ type DevBoxCommitReconciler struct {
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;delete
@@ -130,8 +131,7 @@ func (r *DevBoxCommitReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(commit, CommitFinalizer) {
-		controllerutil.AddFinalizer(commit, CommitFinalizer)
-		if err := r.Update(ctx, commit); err != nil {
+		if err := r.patchCommitFinalizer(ctx, commit, true); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add commit finalizer: %w", err)
 		}
 	}
@@ -256,7 +256,11 @@ func (r *DevBoxCommitReconciler) ensureBuildJob(
 		return nil, fmt.Errorf("get root disk claim %s: %w", pvcName, err)
 	}
 
-	job, err := r.buildJob(commit, source)
+	credential, err := r.syncRegistryCredential(ctx, commit)
+	if err != nil {
+		return nil, r.failCommit(ctx, commit, "RegistryCredentialFailed", err)
+	}
+	job, err := r.buildJob(commit, source, credential)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +287,7 @@ func (r *DevBoxCommitReconciler) ensureBuildJob(
 // so a compromised commit binary cannot write the source or assume a cluster
 // role.
 func (r *DevBoxCommitReconciler) buildJob(
-	commit *devpilotv1alpha1.DevBoxCommit, source commitSource,
+	commit *devpilotv1alpha1.DevBoxCommit, source commitSource, credential string,
 ) (*batchv1.Job, error) {
 	backoff := int32(0)
 	runAsNonRoot := false
@@ -323,8 +327,8 @@ func (r *DevBoxCommitReconciler) buildJob(
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
 						},
 					},
-					Volumes:    r.commitVolumes(source.PVCName),
-					Containers: []corev1.Container{r.commitContainer(commit)},
+					Volumes:    r.commitVolumes(source.PVCName, credential),
+					Containers: []corev1.Container{r.commitContainer(commit, credential)},
 				},
 			},
 		},
@@ -342,7 +346,7 @@ func (r *DevBoxCommitReconciler) buildJob(
 // still declares USER nonroot; only the pod overrides it.
 const commitUserID = 0
 
-func (r *DevBoxCommitReconciler) commitVolumes(pvcName string) []corev1.Volume {
+func (r *DevBoxCommitReconciler) commitVolumes(pvcName, credential string) []corev1.Volume {
 	vols := []corev1.Volume{
 		{
 			Name: RootDiskVolumeName,
@@ -358,12 +362,12 @@ func (r *DevBoxCommitReconciler) commitVolumes(pvcName string) []corev1.Volume {
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 	}
-	if r.Config.RegistrySecret != "" {
+	if credential != "" {
 		vols = append(vols, corev1.Volume{
 			Name: "registry",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: r.Config.RegistrySecret,
+					SecretName: credential,
 					Items: []corev1.KeyToPath{
 						{Key: corev1.DockerConfigJsonKey, Path: "config.json"},
 					},
@@ -376,7 +380,9 @@ func (r *DevBoxCommitReconciler) commitVolumes(pvcName string) []corev1.Volume {
 
 // commitContainer renders the build container and its flags from the spec, so
 // the binary never has to read the DevBox API itself.
-func (r *DevBoxCommitReconciler) commitContainer(commit *devpilotv1alpha1.DevBoxCommit) corev1.Container {
+func (r *DevBoxCommitReconciler) commitContainer(
+	commit *devpilotv1alpha1.DevBoxCommit, credential string,
+) corev1.Container {
 	spec := commit.Spec
 	args := []string{
 		"--rootdisk=" + initroot.DefaultRootDisk,
@@ -417,8 +423,7 @@ func (r *DevBoxCommitReconciler) commitContainer(commit *devpilotv1alpha1.DevBox
 		{Name: RootDiskVolumeName, MountPath: initroot.DefaultRootDisk, ReadOnly: true},
 		{Name: "scratch", MountPath: CommitScratchMount},
 	}
-	if r.Config.RegistrySecret != "" {
-		// go-containerregistry reads DOCKER_CONFIG for its default keychain.
+	if credential != "" {
 		env = append(env, corev1.EnvVar{Name: "DOCKER_CONFIG", Value: CommitRegistryMount})
 		mounts = append(mounts, corev1.VolumeMount{
 			Name: "registry", MountPath: CommitRegistryMount, ReadOnly: true,
@@ -684,13 +689,36 @@ func (r *DevBoxCommitReconciler) finalize(ctx context.Context, commit *devpilotv
 	if err := r.releaseEphemeral(ctx, commit); err != nil {
 		return err
 	}
-	controllerutil.RemoveFinalizer(commit, CommitFinalizer)
-	if err := r.Update(ctx, commit); err != nil {
+	if err := r.patchCommitFinalizer(ctx, commit, false); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("remove commit finalizer: %w", err)
 	}
+	return nil
+}
+
+// patchCommitFinalizer adds or removes the finalizer with a merge patch that
+// carries metadata alone.
+//
+// A full Update cannot do this job: the spec is immutable by CEL, and the typed
+// client always renders the optional changes struct, so a commit created from
+// a manifest without changes goes out with changes: {} and is refused as a
+// spec change. envtest never shows it because it creates every commit through
+// the same typed client, which fills changes in from the start.
+func (r *DevBoxCommitReconciler) patchCommitFinalizer(
+	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, add bool,
+) error {
+	patched := commit.DeepCopy()
+	if add {
+		controllerutil.AddFinalizer(patched, CommitFinalizer)
+	} else {
+		controllerutil.RemoveFinalizer(patched, CommitFinalizer)
+	}
+	if err := r.Patch(ctx, patched, client.MergeFrom(commit)); err != nil {
+		return err
+	}
+	*commit = *patched
 	return nil
 }
 

@@ -79,6 +79,7 @@ func main() {
 	var ingressDomain string
 	var ingressPort int
 	var retentionReclaim string
+	var buildNamespaceSuffix string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -117,6 +118,9 @@ func main() {
 	flag.StringVar(&retentionReclaim, "retention-reclaim", controller.ReclaimTrash,
 		"What happens to a root disk whose DevBox sat out its retention window: "+
 			"trash hands it to the volumetrash recycler, delete removes it at once.")
+	flag.StringVar(&buildNamespaceSuffix, "build-namespace-suffix", controller.BuildNamespaceSuffixDefault,
+		"Suffix of the per-project namespace that holds the copied push credential, "+
+			"e.g. -build. Empty keeps the credential in the project namespace.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -139,6 +143,7 @@ func main() {
 		IngressDomain:          ingressDomain,
 		IngressPort:            int32(ingressPort),
 		RetentionReclaim:       retentionReclaim,
+		BuildNamespaceSuffix:   buildNamespaceSuffix,
 	}
 	if err := operatorConfig.Validate(); err != nil {
 		setupLog.Error(err, "Invalid operator configuration")

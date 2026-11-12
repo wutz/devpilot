@@ -15,6 +15,15 @@ init:
     tag: ""
     pullPolicy: IfNotPresent
 
+build:
+  # Suffix of the per-project namespace that holds the copied registry push
+  # credential. Project members can read secrets in their own project, so the
+  # durable copy is kept in <project><suffix> and a short-lived per-commit copy
+  # is the only thing that appears in the project namespace. Empty keeps the
+  # credential in the project namespace, which is only safe when members cannot
+  # read secrets there.
+  namespaceSuffix: "-build"
+
 retention:
   # What happens to the root disk of a DevBox that sat out its
   # spec.rootDisk.retentionDaysAfterStop window: trash hands the claim to the
@@ -43,6 +52,11 @@ rbac:
   # Create the ClusterRole/ClusterRoleBinding granting the controller access to
   # devboxes and their child resources.
   create: true
+  # Create devpilot-member-edit and devpilot-member-view, the ClusterRoles the
+  # workspace.wutz.dev project operator aggregates into project members by
+  # label. Disable when the cluster has no such operator and members are
+  # granted access some other way.
+  memberRoles: true
 
 leaderElection:
   enabled: true

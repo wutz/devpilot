@@ -79,6 +79,17 @@ rules:
       - get
       - patch
       - update
+  # The commit controller creates <project>-build on first use to hold the
+  # copied push credential, and refreshes an existing one on later builds.
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - create
+      - get
+      - list
+      - watch
   # The spot reclaim detector reads node taints, and the HTTP publisher writes
   # Ingresses; both go through the manager's wide-open default because a Helm
   # release cannot scope them to a namespace.

@@ -41,6 +41,8 @@ const (
 	testCommitName  = "commit-1"
 	testCommitTag   = "v1"
 	testSetEnvPair  = "EIN=1"
+	// testRegistrySecret is the docker config a build pushes with.
+	testRegistrySecret = "registry-creds"
 	// testCommitDigest is a second digest, so the rebase tests can tell the
 	// committed image apart from the base one without a real registry.
 	testCommitDigest = "sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888"
@@ -107,6 +109,24 @@ func newCommitReconciler(registrySecret string) *DevBoxCommitReconciler {
 		Client: k8sClient,
 		Scheme: k8sClient.Scheme(),
 		Config: Config{InitImage: testInit, CommitImage: testCommitImage, RegistrySecret: registrySecret},
+	}
+}
+
+// newIsolatingReconciler is newCommitReconciler with credential isolation on:
+// the push credential is copied out of the project namespace before the build.
+func newIsolatingReconciler() *DevBoxCommitReconciler {
+	r := newCommitReconciler(testRegistrySecret)
+	r.Config.BuildNamespaceSuffix = BuildNamespaceSuffixDefault
+	return r
+}
+
+// dockerConfigSecret is a push credential named testRegistrySecret with the
+// given payload, in the namespace a build would find it.
+func dockerConfigSecret(namespace, payload string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testRegistrySecret, Namespace: namespace},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(payload)},
 	}
 }
 
@@ -239,7 +259,7 @@ var _ = Describe("DevBoxCommit Controller", func() {
 		})
 
 		It("mounts the registry secret as a docker config", func() {
-			secretName := "registry-creds"
+			secretName := testRegistrySecret
 			Expect(k8sClient.Create(ctx, &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace},
 				Type:       corev1.SecretTypeDockerConfigJson,
@@ -258,6 +278,138 @@ var _ = Describe("DevBoxCommit Controller", func() {
 			container := job.Spec.Template.Spec.Containers[0]
 			Expect(container.Env).To(ContainElement(corev1.EnvVar{Name: "DOCKER_CONFIG", Value: CommitRegistryMount}))
 			Expect(container.VolumeMounts).To(ContainElement(HaveField("MountPath", CommitRegistryMount)))
+		})
+
+		It("keeps the durable copy of the push credential out of the project namespace", func() {
+			secretName := testRegistrySecret
+			payload := `{"auths":{"registry.example.com":{"password":"s3cret"}}}`
+			Expect(k8sClient.Create(ctx, dockerConfigSecret(namespace, payload))).To(Succeed())
+			buildNS := namespace + BuildNamespaceSuffixDefault
+			defer func() {
+				_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: buildNS}})
+			}()
+			key := newOfflineCommit(namespace, "devbox-isolated")
+
+			reconcileCommit(newIsolatingReconciler(), key)
+
+			durable := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: buildNS, Name: secretName}, durable)).
+				To(Succeed(), "the durable copy lives in the build namespace")
+			Expect(durable.Data).To(Equal(map[string][]byte{corev1.DockerConfigJsonKey: []byte(payload)}))
+			Expect(durable.Labels).To(HaveKeyWithValue(LabelProjectNS, namespace))
+			Expect(durable.Labels).To(HaveKeyWithValue(LabelCredential, secretName))
+			Expect(durable.Annotations).NotTo(HaveKey("meta.helm.sh/release-name"),
+				"a copy wearing the source release's annotations would be adopted by a later upgrade")
+
+			ns := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: buildNS}, ns)).To(Succeed())
+			Expect(ns.Labels).To(HaveKeyWithValue(LabelProjectNS, namespace))
+		})
+
+		It("mounts a per-commit copy from the project namespace and deletes it with the Job", func() {
+			secretName := testRegistrySecret
+			Expect(k8sClient.Create(ctx, dockerConfigSecret(namespace, `{"auths":{}}`))).To(Succeed())
+			buildNS := namespace + BuildNamespaceSuffixDefault
+			defer func() {
+				_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: buildNS}})
+			}()
+			key := newOfflineCommit(namespace, "devbox-transit")
+			reconciler := newIsolatingReconciler()
+
+			reconcileCommit(reconciler, key)
+
+			transitName := testCommitName + CommitRegistrySuffix
+			transit := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: transitName}, transit)).To(Succeed())
+			Expect(transit.Annotations).To(HaveKeyWithValue(AnnotationCredentialSource, buildNS+"/"+secretName))
+			Expect(transit.OwnerReferences).To(HaveLen(1))
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			var mounted string
+			for _, vol := range job.Spec.Template.Spec.Volumes {
+				if vol.Name == "registry" {
+					mounted = vol.Secret.SecretName
+				}
+			}
+			Expect(mounted).To(Equal(transitName), "the build mounts the short-lived copy")
+
+			commit := &devpilotv1alpha1.DevBoxCommit{}
+			Expect(k8sClient.Get(ctx, key, commit)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, commit)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: transitName}, &corev1.Secret{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the token must not outlive the build")
+			durable := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: buildNS, Name: secretName}, durable)).
+				To(Succeed(), "the durable copy stays for the next build")
+		})
+
+		It("refreshes the durable copy when the source credential rotates", func() {
+			secretName := testRegistrySecret
+			source := dockerConfigSecret(namespace, `{"auths":{"v1":{}}}`)
+			Expect(k8sClient.Create(ctx, source)).To(Succeed())
+			buildNS := namespace + BuildNamespaceSuffixDefault
+			defer func() {
+				_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: buildNS}})
+			}()
+			reconciler := newIsolatingReconciler()
+			reconcileCommit(reconciler, newOfflineCommit(namespace, "devbox-rotate"))
+
+			rotated := `{"auths":{"v2":{}}}`
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, source)).To(Succeed())
+			source.Data[corev1.DockerConfigJsonKey] = []byte(rotated)
+			Expect(k8sClient.Update(ctx, source)).To(Succeed())
+
+			// The next build picks the rotation up rather than serving the old
+			// token. It is driven directly because the first commit still holds
+			// the per-DevBox build slot, which would park a second one in Pending.
+			commit := &devpilotv1alpha1.DevBoxCommit{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName,
+			}, commit)).To(Succeed())
+			_, err := reconciler.syncRegistryCredential(ctx, commit)
+			Expect(err).NotTo(HaveOccurred())
+
+			durable := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: buildNS, Name: secretName}, durable)).To(Succeed())
+			Expect(durable.Data[corev1.DockerConfigJsonKey]).To(Equal([]byte(rotated)))
+		})
+
+		It("reads the credential from the build namespace when the project namespace has none", func() {
+			buildNS := namespace + BuildNamespaceSuffixDefault
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: buildNS},
+			})).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: buildNS}})
+			}()
+			Expect(k8sClient.Create(ctx, dockerConfigSecret(buildNS, `{"auths":{"build":{}}}`))).To(Succeed())
+
+			key := newOfflineCommit(namespace, "devbox-buildns")
+			commit := reconcileCommit(newIsolatingReconciler(), key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseBuilding))
+
+			transit := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitRegistrySuffix,
+			}, transit)).To(Succeed())
+		})
+
+		It("fails the commit when the push credential is missing everywhere", func() {
+			key := newOfflineCommit(namespace, "devbox-nocred")
+			buildNS := namespace + BuildNamespaceSuffixDefault
+			defer func() {
+				_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: buildNS}})
+			}()
+
+			commit := reconcileCommit(newIsolatingReconciler(), key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
+			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "RegistryCredentialFailed")))
 		})
 
 		It("records the pushed image when the Job succeeds", func() {
@@ -489,6 +641,20 @@ var _ = Describe("DevBoxCommit Controller", func() {
 			commit := reconcileCommit(reconciler, key)
 			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseFailed))
 			Expect(commit.Status.Conditions).To(ContainElement(HaveField("Reason", "ResultUnreadable")))
+		})
+
+		It("adds its finalizer without sending the immutable spec back", func() {
+			// The spec is immutable by CEL, so a full Update of the typed object
+			// fails on a commit written from a manifest: the client renders the
+			// optional changes struct, and the stored spec has no changes key.
+			// Reaching Building here proves the finalizer went out as a metadata
+			// patch rather than as part of a spec round trip.
+			key := newOfflineCommit(namespace, "devbox-finalizer")
+
+			commit := reconcileCommit(newCommitReconciler(""), key)
+
+			Expect(commit.Finalizers).To(ContainElement(CommitFinalizer))
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseBuilding))
 		})
 
 		It("reuses the existing Job instead of starting a second build", func() {

@@ -54,6 +54,11 @@ type Config struct {
 	// recycler so the data can be recovered for the buffer period, and
 	// ReclaimDelete deletes it at once. Empty means ReclaimTrash.
 	RetentionReclaim string
+	// BuildNamespaceSuffix turns on credential isolation: the push credential
+	// is copied into <project><suffix> and the build Job mounts it from there,
+	// so project members cannot read a token that pushes to the registry.
+	// Empty keeps the credential in the project namespace.
+	BuildNamespaceSuffix string
 }
 
 // The two ways an expired root disk is reclaimed.
@@ -81,6 +86,16 @@ func (c Config) RetentionReclaimMode() string {
 		return ReclaimTrash
 	}
 	return c.RetentionReclaim
+}
+
+// BuildNamespaceSuffixMode returns the suffix of the per-project build
+// namespace, or empty when the operator leaves credentials in the project
+// namespace. The default isolates them.
+func (c Config) BuildNamespaceSuffixMode() string {
+	if strings.TrimSpace(c.BuildNamespaceSuffix) == "" {
+		return ""
+	}
+	return c.BuildNamespaceSuffix
 }
 
 // ParseSnapshotClassMapping parses "storageClass=snapshotClass,..." into a map.
@@ -154,6 +169,9 @@ func (c Config) Validate() error {
 	}
 	if mode := c.RetentionReclaimMode(); mode != ReclaimTrash && mode != ReclaimDelete {
 		errs = append(errs, fmt.Errorf("retention reclaim %q must be %q or %q", c.RetentionReclaim, ReclaimTrash, ReclaimDelete))
+	}
+	if suffix := c.BuildNamespaceSuffix; suffix != "" && !validBuildNamespaceSuffix(suffix) {
+		errs = append(errs, fmt.Errorf("build namespace suffix %q must be a bare DNS suffix such as -build", suffix))
 	}
 	return errors.Join(errs...)
 }

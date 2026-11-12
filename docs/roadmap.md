@@ -131,6 +131,16 @@
 
 ## M4 平台生态集成与可选控制台看板
 
-- [ ] `workspace.wutz.dev` 聚合 RBAC（`devpilot-member-edit` / `devpilot-member-view`）与 `<project>-build` 命名空间凭证同步
+- [x] `workspace.wutz.dev` 聚合 RBAC（`devpilot-member-edit` / `devpilot-member-view`）与 `<project>-build` 命名空间凭证同步
+
+> 实测记录（2026-11-12，`devpilot-verify` / `devpilot-verify-build`，RTX 5090，manager `devpilot:m4-2`）：
+> - 聚合契约先按集群现状确认：聚合器为 `workspace-edit` / `workspace-view`，选择器是 `matchLabels: workspace.wutz.dev/aggregate-to-member: edit|view`（与已有 `project-member-edit`、`imagebuild-member-edit` 同形），因此新增的 `config/rbac/devpilot_member_edit_role.yaml`、`devpilot_member_view_role.yaml` 只带该标签，不改聚合器；`kubectl apply` 后 `workspace-edit` 的 `devpilot.wutz.dev` 规则已自动出现（edit = devboxes/devboxcommits 全量 + 两个 status 的 get；view = get/list/watch + status get）；
+> - Chart 侧同规则在 `templates/member-roles.yaml`，由 `rbac.memberRoles`（默认 `true`）控制；没有项目运营方的集群可置 false；
+> - 凭证隔离动因：`project-member-edit` 给项目命名空间授予 `secrets: get/list/watch`，项目内的 push token 对每个成员可读，能覆盖不属于自己的镜像。构造约束是 build Job 必须留在项目命名空间（CSI 克隆与根盘 PVC 同命名空间，Pod 也只能挂本命名空间的 Secret），所以拆成两份：耐久副本放 `<project>-build`，项目命名空间里只有一份随 Job 生灭的 `<commit>-registry` 过渡副本；
+> - 新增参数 `--build-namespace-suffix`（默认 `-build`，Chart `build.namespaceSuffix`），置空即关闭隔离、凭证留在项目命名空间（仅当成员读不到 secrets 时才安全）；后缀会拒绝 `/ : 空格`，否则会折叠回项目命名空间或产生非法名；
+> - 实跑：`m4-cred` commit 开建后自动创建 `devpilot-verify-build`（labels `devpilot.wutz.dev/project-namespace: devpilot-verify`），`harbor-push` 副本落地（payload 与源一致，labels 带 `project-namespace` / `credential`，不继承源的 helm 注解），项目命名空间里出现 `m4-cred-registry`（注解 `credential-source: devpilot-verify-build/harbor-push`，owner reference 指向 commit），build Job 的 `registry` volume 指向它；Job 终态后过渡副本随 `releaseRegistryCredential` 删除，耐久副本保留供下次构建；
+> - 凭证轮换用 envtest 覆盖：源 Secret payload 变更后下一次 `syncRegistryCredential` 覆盖耐久副本（`Immutable` 一并清空）；项目命名空间缺失时回落读 `<project>-build`；两处都没有则以 `RegistryCredentialFailed` 失败；
+> - RBAC：管理器需新增 `namespaces` 的 create/get/list/watch（`make manifests` 与 Chart `clusterrole.yaml` 同步）才能按需建 build 命名空间；集群上 `devpilot-manager-role` 已 patch，`auth can-i create namespaces` 由 no 变 yes；
+> - 顺带修掉的线上缺陷：commit 的 finalizer 原先用整对象 `Update` 写入，`spec` 上 `self == oldSelf` 的 CEL 规则会拒绝——typed client 总会序列化可选的 `changes` 结构，而由 YAML 创建的 commit 存的 spec 没有 `changes` 键，于是报 `spec is immutable` 并无限重试（envtest 里所有 commit 都由同一 typed client 创建，`changes` 一开始就存在，所以测不出来）。现改为 metadata merge patch（`patchCommitFinalizer`），`m4-cred` 随即进入 `Building`。
 - [ ] 内置轻量 Web 看板（遵循 `DESIGN.md` 视觉规范：实例卡片、状态流转、一键开关机、一键保存镜像弹窗、计费明细展示）
 - [ ] GitHub Actions 发布流水线：构建多架构镜像 `ghcr.io/wutz/devpilot` 与 OCI Helm Chart `oci://ghcr.io/wutz/charts/devpilot`

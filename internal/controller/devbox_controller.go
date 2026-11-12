@@ -45,6 +45,7 @@ type DevBoxReconciler struct {
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile drives one DevBox toward its desired state: spec.desiredState
@@ -165,6 +166,15 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 	// image pull without ever landing in the spec hash.
 	rebase := box.Status.PendingRebaseImage != ""
 
+	// The host key secret must exist before the pod starts, because the pod
+	// mounts it and a missing volume keeps the container in ContainerCreating.
+	if sshEnabled(box) {
+		if _, err := r.ensureSSHSecret(ctx, box); err != nil {
+			r.setFailed(ctx, box, "SSHKeyFailed", err)
+			return ctrl.Result{}, err
+		}
+	}
+
 	desired, err := r.buildPod(box, pvc, info, rebase)
 	if err != nil {
 		r.setFailed(ctx, box, "PodSpecInvalid", err)
@@ -228,6 +238,12 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 		box.Status.Phase = devpilotv1alpha1.PhaseRunning
 		box.Status.StartingStep = devpilotv1alpha1.StartingStepNone
 		box.Status.Message = ""
+		// The endpoint is only meaningful while the pod exists; the service
+		// that fronts it for the gateway is added with the SSHRoute work.
+		box.Status.Endpoints.SSH = ""
+		if sshEnabled(box) {
+			box.Status.Endpoints.SSH = sshEndpoint(box)
+		}
 		box.Status.StoppedAt = nil
 		box.Status.NonRunningSince = nil
 		box.Status.ScheduledReleaseTime = nil

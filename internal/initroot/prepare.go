@@ -17,6 +17,7 @@ limitations under the License.
 package initroot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -60,6 +61,10 @@ type BootOptions struct {
 	GracePeriod time.Duration
 	// Command is the user process to supervise.
 	Command Command
+	// SSH serves interactive sessions once the persistent root is in place.
+	// Nil leaves the container without a built-in server, which is right when
+	// the image runs its own sshd or the user asked for no SSH access.
+	SSH *SSHOptions
 	// Logf receives lifecycle messages; nil discards them.
 	Logf LogFunc
 
@@ -158,6 +163,16 @@ func Boot(opts BootOptions) (int, error) {
 		}
 		opts.logf("Refreshed opaque directory index", "opaqueDirs", len(dirs))
 		return opts.SyncFn()
+	}
+
+	// SSH comes up before the managed command: a session started in the first
+	// seconds after the pod is ready must find the persistent root, not the
+	// image's empty one. Cancelling on return closes the listener without
+	// waiting for sessions to finish.
+	sshCtx, stopSSH := context.WithCancel(context.Background())
+	defer stopSSH()
+	if opts.SSH != nil {
+		startSSH(sshCtx, *opts.SSH, opts.logf)
 	}
 
 	code, runErr := Run(opts.Command, opts.Starter, ShutdownConfig{

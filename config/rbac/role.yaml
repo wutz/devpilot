@@ -16,6 +16,7 @@ rules:
   resources:
   - persistentvolumeclaims
   - pods
+  - secrets
   verbs:
   - create
   - delete

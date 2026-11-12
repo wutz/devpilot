@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevPilot 控制台</title>
+<style>
+  :root {
+    --ink: #171717;
+    --body: #4d4d4d;
+    --mute: #8f8f8f;
+    --faint: #a1a1a1;
+    --hairline: #ebebeb;
+    --hairline-soft: #f2f2f2;
+    --canvas: #fafafa;
+    --elevated: #ffffff;
+    --link: #0070f3;
+    --error: #ee0000;
+    --warning: #f5a623;
+    --warning-deep: #ab570a;
+    --violet: #7928ca;
+    --cyan: #50e3c2;
+    --sans: Geist, Inter, Arial, system-ui, sans-serif;
+    --mono: "Geist Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 20px;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header.bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 24px;
+    background: var(--canvas);
+    border-bottom: 1px solid var(--hairline);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .wordmark { font-weight: 600; font-size: 16px; letter-spacing: -0.4px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: uppercase;
+    color: var(--mute);
+  }
+  .spacer { flex: 1; }
+
+  input[type="text"], input[type="password"], select {
+    background: var(--elevated);
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    color: var(--ink);
+    font: inherit;
+    padding: 8px 12px;
+    min-width: 180px;
+  }
+  input:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 1px;
+  }
+
+  button {
+    font: inherit;
+    font-weight: 500;
+    border-radius: 6px;
+    border: 1px solid var(--hairline);
+    background: var(--elevated);
+    color: var(--ink);
+    padding: 8px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover { background: var(--hairline-soft); }
+  button:disabled { color: var(--faint); cursor: default; background: var(--elevated); }
+  button.primary {
+    background: var(--ink);
+    color: #fff;
+    border-color: var(--ink);
+  }
+  button.primary:hover { background: #000; }
+  button.primary:disabled { background: var(--faint); border-color: var(--faint); }
+
+  main { max-width: 1200px; margin: 0 auto; padding: 32px 24px 64px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+
+  .card {
+    background: var(--elevated);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .card-head { display: flex; align-items: flex-start; gap: 12px; }
+  .card-title { font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -0.4px; }
+  .card-sub { color: var(--mute); font-size: 12px; font-family: var(--mono); }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 100px;
+    padding: 2px 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    white-space: nowrap;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 9999px; background: var(--mute); }
+  .pill.running { color: #0a7b5f; border-color: #cdeee4; background: #f2fbf8; }
+  .pill.running .dot { background: #00b389; }
+  .pill.starting { color: var(--warning-deep); border-color: var(--warning); background: #fff8ec; }
+  .pill.starting .dot { background: var(--warning); }
+  .pill.stopped .dot { background: var(--faint); }
+  .pill.failed { color: var(--error); border-color: #ffd4d4; background: #fff5f5; }
+  .pill.failed .dot { background: var(--error); }
+  .pill.interrupted { color: var(--violet); border-color: #e6d8f7; background: #faf5ff; }
+  .pill.interrupted .dot { background: var(--violet); }
+
+  dl.meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0; }
+  dl.meta dt { color: var(--mute); font-size: 12px; }
+  dl.meta dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+  .billing {
+    border-top: 1px solid var(--hairline);
+    padding-top: 16px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .billing .amount { font-size: 20px; font-weight: 600; letter-spacing: -0.4px; }
+  .billing .unit { color: var(--mute); font-size: 12px; }
+
+  dialog {
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 0;
+    width: min(560px, calc(100vw - 32px));
+    color: var(--ink);
+    background: var(--elevated);
+  }
+  dialog::backdrop { background: rgba(23, 23, 23, 0.32); }
+  .dialog-body { padding: 24px; }
+  .dialog-head { display: flex; align-items: center; margin-bottom: 16px; }
+  .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .field label { color: var(--body); font-size: 12px; }
+  .field input, .field select { width: 100%; }
+  .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline-soft); font-size: 12px; }
+  th { color: var(--mute); font-family: var(--mono); font-weight: 500; text-transform: uppercase; }
+  td.num { text-align: right; font-family: var(--mono); }
+
+  .notice {
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    background: var(--elevated);
+    padding: 24px;
+    color: var(--body);
+  }
+  .notice strong { color: var(--ink); display: block; margin-bottom: 6px; }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    background: var(--ink);
+    color: #fff;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 14px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms ease;
+    max-width: calc(100vw - 48px);
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { background: var(--error); }
+</style>
+</head>
+<body>
+<header class="bar">
+  <span class="wordmark">DevPilot</span>
+  <span class="eyebrow">控制台</span>
+  <span class="spacer"></span>
+  <input id="namespace" type="text" placeholder="命名空间（留空为全部）" aria-label="命名空间">
+  <input id="token" type="password" placeholder="Bearer Token" aria-label="Bearer Token" autocomplete="off">
+  <button id="refresh" class="primary">刷新</button>
+</header>
+
+<main>
+  <div id="status-line" class="eyebrow" style="margin-bottom:16px"></div>
+  <div id="content" class="grid" aria-live="polite"></div>
+</main>
+
+<dialog id="commit-dialog">
+  <form id="commit-form" method="dialog" class="dialog-body">
+    <div class="dialog-head">
+      <span class="card-title">保存镜像</span>
+      <span class="spacer"></span>
+      <span id="commit-target" class="card-sub"></span>
+    </div>
+    <div class="field">
+      <label for="commit-repository">目标仓库（不含标签）</label>
+      <input id="commit-repository" type="text" placeholder="registry.example.com/library/team-devbox" required>
+    </div>
+    <div class="field">
+      <label for="commit-tags">标签（逗号分隔，留空为 latest）</label>
+      <input id="commit-tags" type="text" placeholder="v1">
+    </div>
+    <div class="field">
+      <label for="commit-consistency">一致性</label>
+      <select id="commit-consistency">
+        <option value="Sync">Sync — CSI 快照，实例可继续运行</option>
+        <option value="Freeze">Freeze — 短暂冻结写入后快照</option>
+        <option value="OfflineOnly">OfflineOnly — 需实例已关机</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="commit-compression">压缩</label>
+      <select id="commit-compression">
+        <option value="zstd">zstd — 更快，层更小</option>
+        <option value="gzip">gzip — 基础镜像为 docker manifest 时必须</option>
+      </select>
+    </div>
+    <div class="field">
+      <label><input id="commit-rebase" type="checkbox"> 保存后将实例切到新镜像并清空上层（仅在离线提交时可用）</label>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="commit-cancel">取消</button>
+      <button type="submit" class="primary" id="commit-submit">开始提交</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="billing-dialog">
+  <div class="dialog-body">
+    <div class="dialog-head">
+      <span class="card-title">计费明细</span>
+      <span class="spacer"></span>
+      <span id="billing-target" class="card-sub"></span>
+    </div>
+    <table>
+      <thead>
+        <tr><th>#</th><th>开始</th><th>时长</th><th>单价</th><th class="num">费用</th><th>结束原因</th></tr>
+      </thead>
+      <tbody id="billing-rows"></tbody>
+    </table>
+    <div class="dialog-actions">
+      <button type="button" id="billing-close">关闭</button>
+    </div>
+  </div>
+</dialog>
+
+<div id="toast" class="toast" role="status"></div>
+
+<script>
+(() => {
+  "use strict";
+  const state = { items: [], busy: new Set(), commitTarget: null };
+
+  const content = document.getElementById("content");
+  const statusLine = document.getElementById("status-line");
+  const namespaceInput = document.getElementById("namespace");
+  const tokenInput = document.getElementById("token");
+  const toast = document.getElementById("toast");
+
+  tokenInput.value = sessionStorage.getItem("devpilot-token") || "";
+  namespaceInput.value = sessionStorage.getItem("devpilot-namespace") || "";
+
+  function notify(message, isError) {
+    toast.textContent = message;
+    toast.className = "toast show" + (isError ? " error" : "");
+    clearTimeout(notify.timer);
+    notify.timer = setTimeout(() => { toast.className = "toast"; }, 4000);
+  }
+
+  function authHeaders() {
+    const token = tokenInput.value.trim();
+    return token ? { Authorization: "Bearer " + token } : {};
+  }
+
+  async function api(path, options) {
+    const request = Object.assign({ headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()) }, options || {});
+    const response = await fetch(path, request);
+    const text = await response.text();
+    const body = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw new Error(body.error || response.status + " " + response.statusText);
+    }
+    return body;
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null && text !== "") node.textContent = text;
+    return node;
+  }
+
+  function phaseClass(phase) {
+    switch (phase) {
+      case "Running": return "running";
+      case "Starting": case "Stopping": case "Pending": return "starting";
+      case "Failed": return "failed";
+      case "Interrupted": return "interrupted";
+      default: return "stopped";
+    }
+  }
+
+  function formatSeconds(total) {
+    if (!total) return "0 分钟";
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (hours > 0) return hours + " 小时 " + minutes + " 分";
+    return minutes + " 分钟";
+  }
+
+  function formatTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  function metaRow(list, term, value, mono) {
+    if (!value) return;
+    list.append(el("dt", "", term), el("dd", mono ? "mono" : "", value));
+  }
+
+  function render() {
+    content.textContent = "";
+    if (state.items.length === 0) {
+      const empty = el("div", "notice");
+      empty.append(el("strong", "", "没有找到实例"));
+      empty.append(el("span", "", "确认命名空间与 Token 后点击刷新。控制台只列出当前 Token 有权读取的 DevBox。"));
+      content.append(empty);
+      return;
+    }
+    for (const box of state.items) {
+      content.append(renderCard(box));
+    }
+  }
+
+  function renderCard(box) {
+    const card = el("article", "card");
+    const head = el("div", "card-head");
+    const titles = el("div");
+    titles.append(el("div", "card-title", box.displayName || box.name));
+    titles.append(el("div", "card-sub", box.namespace + "/" + box.name));
+    head.append(titles);
+    head.append(el("span", "spacer"));
+
+    const pill = el("span", "pill " + phaseClass(box.phase));
+    pill.append(el("span", "dot"), el("span", "", box.phase || "Unknown"));
+    head.append(pill);
+    card.append(head);
+
+    if (box.message) {
+      card.append(el("div", "card-sub", box.message));
+    }
+
+    const meta = el("dl", "meta");
+    metaRow(meta, "镜像", box.activeImage || box.image, true);
+    metaRow(meta, "算力", [box.gpus > 0 ? box.gpus + " × " + (box.gpuModel || "GPU") : "CPU", box.cpu, box.memory].filter(Boolean).join(" · "));
+    metaRow(meta, "根盘", box.rootDiskSize);
+    metaRow(meta, "节点", box.nodeName, true);
+    metaRow(meta, "SSH", box.endpoints && box.endpoints.ssh, true);
+    metaRow(meta, "Jupyter", box.endpoints && box.endpoints.jupyter);
+    if (box.endpoints) {
+      for (const [key, url] of Object.entries(box.endpoints)) {
+        if (key.startsWith("port/")) metaRow(meta, "端口 " + key.slice(5), url);
+      }
+    }
+    metaRow(meta, "停机于", formatTime(box.stoppedAt));
+    metaRow(meta, "预计回收", formatTime(box.releaseAt));
+    card.append(meta);
+
+    const actions = el("div", "actions");
+    const running = box.desiredState === "Running";
+    const toggle = el("button", running ? "" : "primary", running ? "关机" : "开机");
+    toggle.disabled = state.busy.has(box.namespace + "/" + box.name);
+    toggle.addEventListener("click", () => power(box, running ? "Stopped" : "Running"));
+    actions.append(toggle);
+
+    const commit = el("button", "", "保存镜像");
+    commit.addEventListener("click", () => openCommit(box));
+    actions.append(commit);
+
+    const billing = el("button", "", "计费明细");
+    billing.disabled = !(box.segments && box.segments.length);
+    billing.addEventListener("click", () => openBilling(box));
+    actions.append(billing);
+    card.append(actions);
+
+    const row = el("div", "billing");
+    row.append(el("span", "amount", box.totalCost ? "¥ " + box.totalCost : "¥ 0"));
+    row.append(el("span", "unit", "累计 " + formatSeconds(box.billedSeconds) + (box.pricePerHour ? " · ¥" + box.pricePerHour + "/小时" : "")));
+    card.append(row);
+    return card;
+  }
+
+  async function power(box, desiredState) {
+    const key = box.namespace + "/" + box.name;
+    state.busy.add(key);
+    render();
+    try {
+      await api("/api/devboxes/" + encodeURIComponent(box.namespace) + "/" + encodeURIComponent(box.name) + "/state", {
+        method: "POST",
+        body: JSON.stringify({ desiredState })
+      });
+      notify(desiredState === "Running" ? "已请求开机：" + box.name : "已请求关机：" + box.name);
+      await load();
+    } catch (error) {
+      notify("操作失败：" + error.message, true);
+    } finally {
+      state.busy.delete(key);
+      render();
+    }
+  }
+
+  const commitDialog = document.getElementById("commit-dialog");
+  const commitRepository = document.getElementById("commit-repository");
+
+  function openCommit(box) {
+    state.commitTarget = box;
+    document.getElementById("commit-target").textContent = box.namespace + "/" + box.name;
+    if (!commitRepository.value) {
+      const slash = (box.activeImage || box.image).indexOf("/");
+      commitRepository.value = slash > 0 ? (box.activeImage || box.image).slice(0, (box.activeImage || box.image).lastIndexOf(":")) : "";
+    }
+    commitDialog.showModal();
+  }
+
+  document.getElementById("commit-cancel").addEventListener("click", () => commitDialog.close());
+
+  document.getElementById("commit-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const box = state.commitTarget;
+    if (!box) return;
+    const submit = document.getElementById("commit-submit");
+    submit.disabled = true;
+    try {
+      await api("/api/devboxes/" + encodeURIComponent(box.namespace) + "/" + encodeURIComponent(box.name) + "/commits", {
+        method: "POST",
+        body: JSON.stringify({
+          repository: commitRepository.value.trim(),
+          tags: document.getElementById("commit-tags").value.split(",").map((tag) => tag.trim()).filter(Boolean),
+          consistency: document.getElementById("commit-consistency").value,
+          compression: document.getElementById("commit-compression").value,
+          rebaseDevBox: document.getElementById("commit-rebase").checked
+        })
+      });
+      commitDialog.close();
+      notify("已开始保存镜像：" + box.name);
+    } catch (error) {
+      notify("提交失败：" + error.message, true);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  const billingDialog = document.getElementById("billing-dialog");
+  document.getElementById("billing-close").addEventListener("click", () => billingDialog.close());
+
+  function openBilling(box) {
+    document.getElementById("billing-target").textContent = box.namespace + "/" + box.name;
+    const rows = document.getElementById("billing-rows");
+    rows.textContent = "";
+    for (const segment of box.segments) {
+      const tr = el("tr");
+      tr.append(
+        el("td", "num", String(segment.id)),
+        el("td", "", formatTime(segment.startTime)),
+        el("td", "", segment.running ? "进行中" : formatSeconds(segment.billedSeconds)),
+        el("td", "", segment.pricePerHour ? "¥" + segment.pricePerHour : ""),
+        el("td", "num", segment.cost ? "¥" + segment.cost : ""),
+        el("td", "", segment.running ? "" : (segment.endReason || ""))
+      );
+      rows.append(tr);
+    }
+    billingDialog.showModal();
+  }
+
+  async function load() {
+    if (!tokenInput.value.trim()) {
+      state.items = [];
+      render();
+      statusLine.textContent = "填入 Bearer Token 后刷新";
+      return;
+    }
+    sessionStorage.setItem("devpilot-token", tokenInput.value.trim());
+    sessionStorage.setItem("devpilot-namespace", namespaceInput.value.trim());
+    statusLine.textContent = "加载中…";
+    try {
+      const namespace = namespaceInput.value.trim();
+      const data = await api("/api/devboxes" + (namespace ? "?namespace=" + encodeURIComponent(namespace) : ""));
+      state.items = data.items || [];
+      render();
+      statusLine.textContent = "共 " + state.items.length + " 个实例 · " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    } catch (error) {
+      state.items = [];
+      render();
+      statusLine.textContent = "读取失败：" + error.message;
+      notify("读取失败：" + error.message, true);
+    }
+  }
+
+  document.getElementById("refresh").addEventListener("click", load);
+  namespaceInput.addEventListener("keydown", (event) => { if (event.key === "Enter") load(); });
+  tokenInput.addEventListener("keydown", (event) => { if (event.key === "Enter") load(); });
+
+  load();
+})();
+</script>
+</body>
+</html>

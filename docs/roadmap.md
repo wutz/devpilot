@@ -142,5 +142,24 @@
 > - 凭证轮换用 envtest 覆盖：源 Secret payload 变更后下一次 `syncRegistryCredential` 覆盖耐久副本（`Immutable` 一并清空）；项目命名空间缺失时回落读 `<project>-build`；两处都没有则以 `RegistryCredentialFailed` 失败；
 > - RBAC：管理器需新增 `namespaces` 的 create/get/list/watch（`make manifests` 与 Chart `clusterrole.yaml` 同步）才能按需建 build 命名空间；集群上 `devpilot-manager-role` 已 patch，`auth can-i create namespaces` 由 no 变 yes；
 > - 顺带修掉的线上缺陷：commit 的 finalizer 原先用整对象 `Update` 写入，`spec` 上 `self == oldSelf` 的 CEL 规则会拒绝——typed client 总会序列化可选的 `changes` 结构，而由 YAML 创建的 commit 存的 spec 没有 `changes` 键，于是报 `spec is immutable` 并无限重试（envtest 里所有 commit 都由同一 typed client 创建，`changes` 一开始就存在，所以测不出来）。现改为 metadata merge patch（`patchCommitFinalizer`），`m4-cred` 随即进入 `Building`。
-- [ ] 内置轻量 Web 看板（遵循 `DESIGN.md` 视觉规范：实例卡片、状态流转、一键开关机、一键保存镜像弹窗、计费明细展示）
-- [ ] GitHub Actions 发布流水线：构建多架构镜像 `ghcr.io/wutz/devpilot` 与 OCI Helm Chart `oci://ghcr.io/wutz/charts/devpilot`
+- [x] GitHub Actions 发布流水线：构建多架构镜像 `ghcr.io/wutz/devpilot` 与 OCI Helm Chart `oci://ghcr.io/wutz/charts/devpilot`
+
+> 实测记录（2026-11-12，tag `v0.1.0`，run [43169173180](https://github.com/wutz/devpilot/actions/runs/43169173180)）：
+> - 触发面只有一个：`push: tags: v*`。没有加 `workflow_dispatch`——版本号由 tag 定，手动跑一个没有 tag 的构建只会产出 `sha-` 前缀的镜像，和 Chart 的 `appVersion` 对不上；
+> - 三个镜像走同一份矩阵（`devpilot` / `devpilot-init` / `devpilot-commit`），`platforms: linux/amd64,linux/arm64` 但**没有 QEMU**：三个 Dockerfile 本来就是 `TARGETOS`/`TARGETARCH` 交叉编译 + `CGO_ENABLED=0`，buildx 在原生 runner 上直接编出两个架构；
+> - 缓存按镜像分域（`type=gha,scope=<name>`），否则三个构建互相污染对方的层；
+> - 四个动作的 `sha` 全部核对过真实 tag（checkout `de0fac2e`、setup-buildx `e468171a`、login `5e57cd11`、metadata `c1e51972`、build-push `1dc73863`、setup-helm `1a275c3b`），没有沿用任何记忆里的版本号——第一版猜的三个里错了三个；
+> - `chart` job `needs: images`：`helm package --version/--app-version "${GITHUB_REF_NAME#v}"` 后 `helm push` 到 `oci://ghcr.io/wutz/charts`。同时给 `lint.yml` 加了第二个同名 job（`Run on Ubuntu`）跑 `make helm-lint` + `helm package`，让打包缺陷在 PR 阶段暴露而不是在 tag 上；
+> - 顺手修掉的 Chart 缺陷：`init.image.repository` 原先指向管理器镜像，且没有任何地方传 `--devpilot-commit-image`，于是**从仓库装出来的 Chart 每次 commit 都会以 `no devpilot-commit image is configured` 失败**（这正是 `devpilot-verify` 上早先踩到的那个错）。现在 `init`/`commit` 各指向自己的镜像，tag 默认 `.Chart.AppVersion`；`helm template` 渲染出 `devpilot:0.1.0` / `devpilot-init:0.1.0` / `devpilot-commit:0.1.0` 三个不同引用；
+> - 终态：`Image devpilot-init success`、`Image devpilot-commit success`、`Image devpilot success`、`Chart success`；`helm show chart oci://ghcr.io/wutz/charts/devpilot --version 0.1.0` 拉取成功（digest `sha256:43a6fced…`），即用户侧 `helm install … --version 0.1.0` 的路径通了。
+
+- [x] 内置轻量 Web 看板（遵循 `DESIGN.md` 视觉规范：实例卡片、状态流转、一键开关机、一键保存镜像弹窗、计费明细展示）
+
+> 实测记录（2026-11-12，`devpilot-verify`，manager `devpilot:m4-dash`，`--dashboard-bind-address=:8082`）：
+> - 权限模型是这套设计的全部要点：看板**不持有任何自己的权限**。每个请求从 `Authorization: Bearer <token>` 取 token，用 `rest.CopyConfig(mgr.GetConfig())` 复制管理器配置后只替换 `BearerToken`（同时清空 `BearerTokenFile`/`Username`/`Password`/`ExecProvider`/`AuthProvider`，否则旧凭据会覆盖 token），每次请求新建 client。于是 API Server 按**调用者本人**的 RBAC 判权，看板既不能绕过上一项做出的 `devpilot-member-*` 聚合角色，也不需要为它单独设计授权；
+> - 实测三态：不带 token → `401 {"error":"an Authorization: Bearer token is required"}`；用 `devpilot-verify/default` 身份（无 devpilot RBAC）→ `403 … cannot list resource "devboxes"`，原样透传 API Server 的拒绝；用管理器 SA → 列出 `devpilot-verify` 六个实例（`m1-verify`、`m2-verify`、`m3-idle`、`m3-route`、`m3-spot`、`m3-ssh-verify`）及各自 phase/desiredState/totalCost；
+> - 写动作走真实 API Server：对 `m3-idle` 发 `{"desiredState":"Stopped"}`（本就是 Stopped，等价于一次空转 patch）返回 200 且 `desiredState` 仍为 Stopped；非法 `compression: brotli` 在**建对象之前**就被拒为 400（`compression must be zstd or gzip`），即校验发生在触碰集群之前，不会留下半成品 commit；
+> - 形态：`internal/dashboard` 用 `go:embed` 把单文件 HTML 打进管理器二进制，静态页与 `/api` 同一 mux；作为 `mgr.Add(Runnable)` 加入管理器，绑定失败会连带管理器退出，随 `ctx.Done()` 优雅关停（10s 超时）；
+> - 新参数 `--dashboard-bind-address`（空即关闭），Chart 侧 `dashboard.enabled` / `dashboard.bindAddress` / `dashboard.service.*`。`targetPort` 由 `bindAddress` 末尾端口推导（`devpilot.dashboardPort`），`enabled: true` 而地址无端口时**直接渲染失败**，避免 Service 指向一个从未监听的端口；
+> - 镜像构建缺陷：`.dockerignore` 原先只放行 `**/*.go`，`go:embed assets` 在容器里报 `pattern assets: no matching files found`（本地能过是因为本地有文件）。已补 `!internal/dashboard/assets/**`；这个缺陷只会在**发布流水线**上暴露，本地 `go build` 测不出来；
+> - 视觉遵循 `DESIGN.md`（Vercel/Geist）：ink `#171717`、canvas `#fafafa`、hairline `#ebebeb`、6px 控件 / 12px 卡片圆角、等宽大写 eyebrow、扁平描边卡片；`DESIGN.md` 由 `npx getdesign add vercel` 生成后修掉了一行被污染的 `fontWeight` 才让 frontmatter 可解析。

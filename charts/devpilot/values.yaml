@@ -84,6 +84,26 @@ webhook:
   enabled: false
   port: 9443
 
+# Optional web console served by the manager itself.
+#
+# It holds no authority of its own: every request carries the caller's bearer
+# token and runs as that caller, so the API server's RBAC is what decides what
+# the console can see and do. Put it behind whatever authenticates your users
+# (an ingress with an OIDC filter, or a port-forward) rather than exposing it
+# raw, since the console only checks that a token was sent, not who sent it.
+dashboard:
+  enabled: false
+  # Address the manager binds the console to; the port here is also the
+  # Service target port. Empty is refused when enabled, since it would leave
+  # the Service pointing at a listener that never opened.
+  bindAddress: ":8082"
+  service:
+    # ClusterIP keeps the console inside the cluster; switch to NodePort or
+    # LoadBalancer only behind an authenticating proxy.
+    type: ClusterIP
+    port: 8082
+    annotations: {}
+
 # Namespace where the operator runs. Empty means the release namespace.
 namespaceOverride: ""
 

@@ -58,3 +58,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- join "," $pairs -}}
 {{- end }}
+
+{{/*
+Port of the web console, taken from the tail of dashboard.bindAddress so the
+Service can never target a port the manager does not listen on. Fails the
+render instead of guessing when the address carries no usable port.
+*/}}
+{{- define "devpilot.dashboardPort" -}}
+{{- $port := last (splitList ":" .Values.dashboard.bindAddress) -}}
+{{- if not (regexMatch "^[0-9]+$" $port) -}}
+{{- fail (printf "dashboard.bindAddress %q has no numeric port" .Values.dashboard.bindAddress) -}}
+{{- end -}}
+{{- $port -}}
+{{- end }}

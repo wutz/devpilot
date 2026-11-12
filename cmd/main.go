@@ -40,6 +40,7 @@ import (
 	sshgatewayv1alpha1 "github.com/wutz/sshgateway/api/v1alpha1"
 
 	"github.com/wutz/devpilot/internal/controller"
+	"github.com/wutz/devpilot/internal/dashboard"
 	webhookv1alpha1 "github.com/wutz/devpilot/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -80,6 +81,7 @@ func main() {
 	var ingressPort int
 	var retentionReclaim string
 	var buildNamespaceSuffix string
+	var dashboardAddr string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -121,6 +123,10 @@ func main() {
 	flag.StringVar(&buildNamespaceSuffix, "build-namespace-suffix", controller.BuildNamespaceSuffixDefault,
 		"Suffix of the per-project namespace that holds the copied push credential, "+
 			"e.g. -build. Empty keeps the credential in the project namespace.")
+	flag.StringVar(&dashboardAddr, "dashboard-bind-address", "",
+		"Address the optional web console listens on, e.g. :8082. Every request acts "+
+			"with the bearer token it carries, so the console is never more powerful than its caller. "+
+			"Empty disables it.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -270,6 +276,14 @@ func main() {
 			setupLog.Error(err, "Failed to create webhook", "webhook", "DevBox")
 			os.Exit(1)
 		}
+	}
+	if dashboardAddr != "" {
+		if err := mgr.Add(dashboard.NewRunnable(dashboard.New(scheme, mgr.GetConfig(),
+			ctrl.Log.WithName("dashboard")), dashboardAddr)); err != nil {
+			setupLog.Error(err, "Failed to create the web console")
+			os.Exit(1)
+		}
+		setupLog.Info("Serving the web console", "address", dashboardAddr)
 	}
 	// +kubebuilder:scaffold:builder
 

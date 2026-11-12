@@ -212,12 +212,20 @@ func TestServeHonoursAPTYRequestOfZeroSize(t *testing.T) {
 	if err := session.RequestPty("xterm", 0, 0, ssh.TerminalModes{}); err != nil {
 		t.Fatalf("request pty: %v", err)
 	}
-	out, err := session.Output("tty")
+	// The client sends no input, so its stdin closes at once. The shell must
+	// still run both commands: closing the PTY master on that EOF kills it with
+	// a SIGHUP after the first line, which is what made this fail on Linux.
+	out, err := session.Output("tty; echo before; echo after")
 	if err != nil {
-		t.Fatalf("run tty: %v", err)
+		t.Fatalf("run tty: %v (output %q)", err, out)
 	}
-	if got := strings.TrimSpace(string(out)); !strings.HasPrefix(got, "/dev/") {
-		t.Errorf("tty = %q, want a pseudo terminal", got)
+	got := string(out)
+	// The driver echoes the end-of-file character the server writes when the
+	// client's stdin closes, which shows up as "^D\b\b" in the captured bytes.
+	for _, want := range []string{"/dev/", "before", "after"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q is missing %q", got, want)
+		}
 	}
 }
 

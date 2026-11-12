@@ -32,6 +32,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// ptyEOF is the terminal driver's end-of-file character (Ctrl-D). Writing it is
+// how a client that has nothing more to send says so without hanging up.
+const ptyEOF = 0x04
+
 // Config describes the built-in server. It exists because a devbox image may
 // carry no sshd at all (the NVIDIA PyTorch images ship none), and the user must
 // still be able to open a session.
@@ -332,17 +336,26 @@ func runShell(
 		logf("Could not start a PTY", "user", spec.user, "err", err.Error())
 		return 1
 	}
-	termFile.attach(ptmx, spec.dims)
+	// A zero size from the client would leave the kernel default of 0x0, which
+	// makes the shell's line editor unusable, so fall back to a normal terminal.
+	dims := spec.dims
+	if dims == nil {
+		dims = &pty.Winsize{Cols: 80, Rows: 24}
+	}
+	termFile.attach(ptmx, dims)
 	defer func() {
 		termFile.attach(nil, nil)
 		_ = ptmx.Close()
 	}()
 
-	// Client to shell. Closing the PTY on EOF sends the shell a SIGHUP, which is
-	// what a dropped connection does to a real SSH session.
+	// Client to shell. End of input is the terminal's own end-of-file character
+	// rather than closing the master: closing it sends the shell a SIGHUP, which
+	// kills a command that has already produced its output — `ssh -tt host cmd`
+	// from a script closes its stdin immediately, so the shell must be allowed to
+	// run to completion.
 	go func() {
 		_, _ = io.Copy(ptmx, channel)
-		_ = ptmx.Close()
+		_, _ = ptmx.Write([]byte{ptyEOF})
 	}()
 	_, _ = io.Copy(channel, ptmx)
 

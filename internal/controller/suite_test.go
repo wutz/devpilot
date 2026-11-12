@@ -36,6 +36,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	sshgatewayv1alpha1 "github.com/wutz/sshgateway/api/v1alpha1"
+
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -66,6 +68,11 @@ var _ = BeforeSuite(func() {
 	err = devpilotv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = snapshotv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+	// The devbox controller writes SSHRoutes when a devbox names a gateway. The
+	// CRDs come from testdata/crds, so the API exists in the test cluster even
+	// though no gateway operator runs there.
+	err = sshgatewayv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme

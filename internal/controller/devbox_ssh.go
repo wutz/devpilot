@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -70,7 +71,7 @@ func sshUsername(box *devpilotv1alpha1.DevBox) string {
 }
 
 // ensureSSHSecret creates the host key on first use and keeps authorized_keys
-// in step with the spec.
+// in step with the spec and with the key the gateway logs in with.
 //
 // The host key is generated once and never rotated: clients pin it in
 // known_hosts, and a new key would greet every user with a host key changed
@@ -79,8 +80,17 @@ func (r *DevBoxReconciler) ensureSSHSecret(ctx context.Context, box *devpilotv1a
 	log := logf.FromContext(ctx)
 	name := box.Name + SSHSecretSuffix
 
+	// The gateway key is read here rather than at start: the gateway operator
+	// may create its identity after the devbox did, and the extra key must reach
+	// a running pod without a restart, which reads authorized_keys per login.
+	gatewayKey, err := r.gatewayIdentityKey(ctx, box)
+	if err != nil {
+		return nil, err
+	}
+	wanted := authorizedKeysData(box, gatewayKey)
+
 	secret := &corev1.Secret{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: name}, secret)
+	err = r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: name}, secret)
 	if isNotFound(err) {
 		private, public, genErr := sshhost.GenerateHostKey("devpilot:" + box.Name)
 		if genErr != nil {
@@ -96,7 +106,7 @@ func (r *DevBoxReconciler) ensureSSHSecret(ctx context.Context, box *devpilotv1a
 			Data: map[string][]byte{
 				SSHHostKeyKey:      private,
 				SSHHostKeyPubKey:   public,
-				SSHAuthorizedKeyID: authorizedKeysData(box),
+				SSHAuthorizedKeyID: wanted,
 			},
 		}
 		if ownerErr := ctrlSetOwner(secret, box, r.Scheme); ownerErr != nil {
@@ -123,7 +133,6 @@ func (r *DevBoxReconciler) ensureSSHSecret(ctx context.Context, box *devpilotv1a
 			name, SSHHostKeyKey)
 	}
 
-	wanted := authorizedKeysData(box)
 	if bytes.Equal(secret.Data[SSHAuthorizedKeyID], wanted) {
 		return secret, nil
 	}
@@ -135,14 +144,27 @@ func (r *DevBoxReconciler) ensureSSHSecret(ctx context.Context, box *devpilotv1a
 	return secret, nil
 }
 
-// authorizedKeysData renders the spec keys as an authorized_keys file: one key
-// per line, newline terminated. A CRD list cannot carry a trailing blank line,
-// and sshd rejects a final line without one.
-func authorizedKeysData(box *devpilotv1alpha1.DevBox) []byte {
-	if box.Spec.Access.SSH == nil || len(box.Spec.Access.SSH.AuthorizedKeys) == 0 {
+// authorizedKeysData renders the spec keys plus the gateway identity key as an
+// authorized_keys file: one key per line, newline terminated. A CRD list cannot
+// carry a trailing blank line, and sshd rejects a final line without one.
+//
+// The gateway key is appended last and deduplicated, so a spec key that already
+// matches it does not appear twice.
+func authorizedKeysData(box *devpilotv1alpha1.DevBox, extra ...string) []byte {
+	var lines []string
+	if box.Spec.Access.SSH != nil {
+		lines = append(lines, box.Spec.Access.SSH.AuthorizedKeys...)
+	}
+	for _, line := range extra {
+		line = strings.TrimSpace(line)
+		if line != "" && !slices.Contains(lines, line) {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
 		return nil
 	}
-	return []byte(strings.Join(box.Spec.Access.SSH.AuthorizedKeys, "\n") + "\n")
+	return []byte(strings.Join(lines, "\n") + "\n")
 }
 
 // sshVolume exposes the host key secret to the main container, read-only.

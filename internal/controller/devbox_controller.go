@@ -22,10 +22,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	sshgatewayv1alpha1 "github.com/wutz/sshgateway/api/v1alpha1"
 
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 )
@@ -46,7 +49,10 @@ type DevBoxReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=sshgateway.wutz.dev,resources=sshroutes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=sshgateway.wutz.dev,resources=sshgateways,verbs=get;list;watch
 
 // Reconcile drives one DevBox toward its desired state: spec.desiredState
 // selects between the running and stopped halves of the state machine, and
@@ -94,6 +100,14 @@ func (r *DevBoxReconciler) reconcileLifecycle(ctx context.Context, box *devpilot
 	}
 	if box.Status.RootDiskPVC != pvc.Name {
 		box.Status.RootDiskPVC = pvc.Name
+	}
+
+	// The Service and the gateway route outlive a stop: the gateway claims the
+	// username for as long as the route exists, so keeping them means a user's
+	// SSH config does not change when the devbox is shut down and started again.
+	if err := r.ensureSSHAccess(ctx, box); err != nil {
+		r.setFailed(ctx, box, "SSHRouteFailed", err)
+		return ctrl.Result{}, err
 	}
 
 	pod, err := r.currentPod(ctx, box)
@@ -238,11 +252,15 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 		box.Status.Phase = devpilotv1alpha1.PhaseRunning
 		box.Status.StartingStep = devpilotv1alpha1.StartingStepNone
 		box.Status.Message = ""
-		// The endpoint is only meaningful while the pod exists; the service
-		// that fronts it for the gateway is added with the SSHRoute work.
+		// The endpoint is only meaningful while the pod exists. A published
+		// devbox reports its gateway address instead, which is the one stable
+		// enough to put in an SSH config.
 		box.Status.Endpoints.SSH = ""
 		if sshEnabled(box) {
 			box.Status.Endpoints.SSH = sshEndpoint(box)
+			if viaGateway := r.sshGatewayEndpoint(ctx, box); viaGateway != "" {
+				box.Status.Endpoints.SSH = viaGateway
+			}
 		}
 		box.Status.StoppedAt = nil
 		box.Status.NonRunningSince = nil
@@ -328,10 +346,34 @@ func (r *DevBoxReconciler) currentPod(ctx context.Context, box *devpilotv1alpha1
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DevBoxReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&devpilotv1alpha1.DevBox{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
-		Named("devbox").
-		Complete(r)
+		Owns(&corev1.Service{})
+	// The gateway API is optional: on a cluster that does not run the gateway
+	// operator its kind is not in the RESTMapper, and asking the builder to
+	// watch it would keep the manager from starting at all.
+	if r.hasSSHRouteAPI(mgr) {
+		builder = builder.Owns(&sshgatewayv1alpha1.SSHRoute{})
+	} else {
+		logf.Log.Info("SSH gateway API is not installed; DevBoxes will not publish routes",
+			"apiVersion", sshgatewayv1alpha1.GroupVersion.String())
+	}
+	return builder.Named("devbox").Complete(r)
+}
+
+// hasSSHRouteAPI reports whether the SSHRoute kind is served by this cluster.
+// A nil RESTMapper makes it false: without one there is no way to ask, and
+// starting without the watch is better than failing to start.
+func (r *DevBoxReconciler) hasSSHRouteAPI(mgr ctrl.Manager) bool {
+	mapper := mgr.GetRESTMapper()
+	if mapper == nil {
+		return false
+	}
+	_, err := mapper.RESTMapping(
+		schema.GroupKind{Group: sshgatewayv1alpha1.GroupVersion.Group, Kind: "SSHRoute"},
+		sshgatewayv1alpha1.GroupVersion.Version,
+	)
+	return err == nil
 }

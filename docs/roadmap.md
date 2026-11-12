@@ -72,7 +72,7 @@
 目标：补齐生产级用户体验与智算云商业化运营闭环。
 
 - [x] 容器内 SSH 服务托管（兼容自带 `sshd` 与内置 Go SSH Server 兜底），持久化 `<devbox>-hostkey` Secret
-- [ ] 对接 `sshgateway.wutz.dev` 自动生成 `SSHRoute`（验证 VS Code / Cursor Remote-SSH 端到端连接与端口转发）
+- [x] 对接 `sshgateway.wutz.dev` 自动生成 `SSHRoute`（验证 VS Code / Cursor Remote-SSH 端到端连接与端口转发）
 - [ ] JupyterLab 自动托管与自定义 HTTP 端口暴露（生成 Gateway API `HTTPRoute` / Ingress，适配 `bz1-dev1` `:7443` 端口）
 - [ ] 抢占式（`Spot`）驱逐检测与 `Interrupted` 状态流转、运行段计费账本（`status.segments[]`）
 - [ ] 闲置自动关机（`idleShutdownMinutes`）与连续停机/中断 15 天超期自动回收（含提前预警 Event 与 `volumetrash` 对接）
@@ -84,6 +84,16 @@
 > - `ssh -tt host 'cmd'` 从无终端脚本发起（`pty-req` 尺寸 0x0）可正常拿到 PTY 并执行完整命令，非 PTY 的 `ssh host cmd` 正确回传退出码（`exit 9` → 9）；
 > - 实测暴露并修复两个缺陷：#23 的 0x0 `pty-req` 被当成「不要 PTY」，以及 stdin 立刻 EOF 时关闭 PTY 主设备导致 shell 被 `SIGHUP` 杀死（Linux 上必现，macOS 上偶发）；
 > - 同期发现并修正：集群上 `devpilot-manager-role` 未随 RBAC 清单更新，缺少 `secrets` 权限导致 Secret informer 无法建立、reconcile 卡在等待 PVC。
+
+> 实测记录（2026-11-12，`devpilot-verify/m3-route` + `forgeai-system/main` 网关，RTX 5090，manager `devpilot:m3-2`）：
+> - 前置：集群上已有 `sshgateway` Chart 0.4.0 控制器（`--gateway-namespace=forgeai-system`，sshpiper `full-v1.6.1`），新建 `SSHGatewayClass/sshgateway` 与 `SSHGateway/forgeai-system/main`（`allowedRoutes.namespaces.from: All`，2222 端口），三个条件 `Accepted/Programmed/Ready` 全部为 True；
+> - DevBox 置 `access.ssh.gatewayRef.name=main, namespace=forgeai-system` 后，控制器在 PVC 绑定阶段即生成同名的 `Service/m3-route`（22/TCP）与 `SSHRoute/m3-route`，用户名 `devpilot-verify-m3-route`（命名空间限定，网关内唯一），`backendRefs` 指向 `m3-route:22 / root`；网关侧 `status.listeners[0].attachedRoutes` 由 0 变 1，`Accepted`、`ResolvedRefs` 均为 True，DevBox 条件 `SSHRouteReady=True/RouteAccepted`；
+> - 网关平台身份公钥（`sshgateway-identity/ssh-publickey`）被自动并入 `<devbox>-hostkey` 的 `authorized_keys`，与用户客户端密钥并列，路由的 `authorizedKeys` 只含客户端密钥；
+> - `ssh -p 30322 devpilot-verify-m3-route@10.243.145.105` 经网关登录成功（`m3-route-pod`，`root`），网关呈现 sshpiper 自身主机密钥（`SSH-2.0-SSHPiper`），对内层 `m3-route.devpilot-verify.svc` 按 `known_hosts_data` 校验后端主机密钥，客户端 `known_hosts` 无需感知 Pod 变化；
+> - `-L 127.0.0.1:18022:127.0.0.1:22` 免密转发成功，端口转发（Remote-SSH 的 devcontainer / 调试端口链路）可用；
+> - 关机再开机后 `Service` 与 `SSHRoute` 原样保留（用户名不被释放、不改变），重新连接在 `StrictHostKeyChecking=yes` 下通过，`hostname` 与登录用户不变；
+> - 环境限制：MetalLB 地址池已耗尽（`no available IPs`），`SSHGateway` 的 `status.addresses` 为空，故 `status.endpoints.ssh` 回落到 Pod 级地址；NodePort `30322` 在网关 Pod 所在节点 `gn-10-243-145-105` 上可达，共享 VIP `10.243.147.247` 上不可达，实测即经该 NodePort 完成；
+> - 集群上 `devpilot-manager-role` 再次需随清单补齐 `services` 与 `sshgateway.wutz.dev/sshgateways,sshroutes` 权限（已 patch，未重新 apply 整份清单）。
 
 ---
 

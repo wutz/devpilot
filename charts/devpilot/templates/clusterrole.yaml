@@ -53,6 +53,13 @@ rules:
       - update
       - watch
   - apiGroups:
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
       - ""
     resources:
       - persistentvolumeclaims
@@ -72,6 +79,49 @@ rules:
       - get
       - patch
       - update
+  # The spot reclaim detector reads node taints, and the HTTP publisher writes
+  # Ingresses; both go through the manager's wide-open default because a Helm
+  # release cannot scope them to a namespace.
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - sshgateway.wutz.dev
+    resources:
+      - sshroutes
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - sshgateway.wutz.dev
+    resources:
+      - sshgateways
+    verbs:
+      - get
+      - list
+      - watch
   - apiGroups:
       - batch
     resources:

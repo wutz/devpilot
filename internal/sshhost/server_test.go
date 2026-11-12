@@ -180,6 +180,47 @@ func TestServeRunsACommandForAnAuthorizedKey(t *testing.T) {
 	}
 }
 
+// `ssh -tt` from a script asks for a terminal but leaves the size at 0x0, so
+// the request has to be honoured on its own. Keying off the size instead
+// quietly turned such a session into a pipe, where `tty` fails and full screen
+// programs refuse to start.
+func TestServeHonoursAPTYRequestOfZeroSize(t *testing.T) {
+	host := newSigner(t)
+	client := newSigner(t)
+
+	addr := serve(t, Config{
+		HostKey:            host,
+		AuthorizedKeysPath: writeAuthorizedKeys(t, client.PublicKey()),
+	})
+
+	conn, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            testUser,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(client)},
+		HostKeyCallback: ssh.FixedHostKey(host.PublicKey()),
+		Timeout:         5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	session, err := conn.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+	if err := session.RequestPty("xterm", 0, 0, ssh.TerminalModes{}); err != nil {
+		t.Fatalf("request pty: %v", err)
+	}
+	out, err := session.Output("tty")
+	if err != nil {
+		t.Fatalf("run tty: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); !strings.HasPrefix(got, "/dev/") {
+		t.Errorf("tty = %q, want a pseudo terminal", got)
+	}
+}
+
 func TestServeRefusesAnUnknownKey(t *testing.T) {
 	host := newSigner(t)
 	client := newSigner(t)

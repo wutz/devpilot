@@ -227,6 +227,7 @@ func session(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Requ
 	var (
 		term     string
 		dims     *pty.Winsize
+		ptyReq   bool
 		spec     sessionSpec
 		started  bool
 		finished = make(chan struct{})
@@ -247,7 +248,11 @@ func session(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Requ
 			}
 			switch req.Type {
 			case "pty-req":
+				// The request itself, not the size, is what asks for a terminal:
+				// `ssh -tt` from a script sends 0x0, and treating that as "no
+				// PTY" silently downgrades the session to a pipe.
 				term, dims = parsePTYRequest(req.Payload)
+				ptyReq = true
 				_ = req.Reply(true, nil)
 			case "env":
 				// Accepted so clients do not fail; the server's environment is
@@ -265,7 +270,7 @@ func session(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Requ
 				}
 				started = true
 				_ = req.Reply(true, nil)
-				spec = sessionSpec{term: term, dims: dims, user: user}
+				spec = sessionSpec{term: term, dims: dims, user: user, pty: ptyReq}
 				if req.Type == "exec" {
 					spec.command = parseString(req.Payload)
 				}
@@ -288,6 +293,9 @@ type sessionSpec struct {
 	term    string
 	dims    *pty.Winsize
 	user    string
+	// pty records that the client sent pty-req, which is what makes a session
+	// interactive even when it left the size at zero.
+	pty bool
 }
 
 // runShell starts the shell, pumps bytes both ways and returns the exit status,
@@ -313,7 +321,7 @@ func runShell(
 	// inherited working directory rather than failing every command.
 	cmd.Dir = workDir(cfg.Env)
 
-	if spec.dims == nil && spec.command != "" {
+	if !spec.pty && spec.command != "" {
 		// No PTY: a plain command run, where stderr stays separate from stdout.
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = channel, channel, channel.Stderr()
 		return exitCode(cmd.Run(), logf, spec)

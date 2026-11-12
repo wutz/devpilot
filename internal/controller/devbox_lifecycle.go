@@ -269,6 +269,10 @@ func specHash(box *devpilotv1alpha1.DevBox, pvcName string, info ImageInfo) (str
 		Tolerations []corev1.Toleration
 		InitImage   string
 		PVC         string
+		// SSH only records whether the server runs, never the keys themselves:
+		// authorized_keys is read from the mounted secret per connection, so
+		// editing the list must not replace a running pod.
+		SSH bool
 	}{
 		// ImageRef rather than spec.image: a pending rebase starts the pod from
 		// the committed image before spec.image is updated to match.
@@ -286,6 +290,7 @@ func specHash(box *devpilotv1alpha1.DevBox, pvcName string, info ImageInfo) (str
 		Tolerations: box.Spec.Tolerations,
 		InitImage:   "",
 		PVC:         pvcName,
+		SSH:         sshEnabled(box),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

@@ -343,12 +343,26 @@ func mainContainer(box *devpilotv1alpha1.DevBox, info ImageInfo, rebase bool, en
 				Drop: []corev1.Capability{capabilityAll},
 			},
 		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: InitVolumeName, MountPath: InitMountPath},
-			{Name: RootDiskVolumeName, MountPath: RootDiskMountPath},
-			{Name: ShmVolumeName, MountPath: "/dev/shm"},
-		},
+		VolumeMounts: volumeMounts(box),
 	}
+}
+
+// volumeMounts lists the main container's mounts. The SSH keys are mounted
+// read-only: the host key is operator state, not a file a session may rewrite.
+func volumeMounts(box *devpilotv1alpha1.DevBox) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: InitVolumeName, MountPath: InitMountPath},
+		{Name: RootDiskVolumeName, MountPath: RootDiskMountPath},
+		{Name: ShmVolumeName, MountPath: "/dev/shm"},
+	}
+	if sshEnabled(box) {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      SSHVolumeName,
+			MountPath: SSHMountPath,
+			ReadOnly:  true,
+		})
+	}
+	return mounts
 }
 
 // shellNames are the interpreters that exit immediately without a TTY: with
@@ -394,10 +408,13 @@ func isBareShell(argv []string) bool {
 // rather than anything after "--", which is exec'd as the user process.
 func devBoxCommand(box *devpilotv1alpha1.DevBox, info ImageInfo, rebase bool) []string {
 	user := startCommand(box, info)
-	argv := make([]string, 0, 4+len(user))
+	argv := make([]string, 0, 8+len(user))
 	argv = append(argv, "--image-ref="+info.ImageRef, "--image-digest="+info.Digest)
 	if rebase {
 		argv = append(argv, "--rebase")
+	}
+	if sshEnabled(box) {
+		argv = append(argv, sshCommandFlags()...)
 	}
 	argv = append(argv, "--")
 	return append(argv, user...)
@@ -428,10 +445,14 @@ func volumes(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, sh
 			},
 		},
 	}
+	if sshEnabled(box) {
+		vols = append(vols, sshVolume(box))
+	}
 	seen := map[string]struct{}{
 		InitVolumeName:     {},
 		RootDiskVolumeName: {},
 		ShmVolumeName:      {},
+		SSHVolumeName:      {},
 	}
 	for _, extra := range box.Spec.Volumes {
 		if _, dup := seen[extra.Name]; dup || extra.PersistentVolumeClaim == nil {

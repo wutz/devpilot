@@ -64,6 +64,9 @@ func (d *DevBoxDefaulter) Default(_ context.Context, obj *devpilotv1alpha1.DevBo
 	if obj.Spec.BillingMode == "" {
 		obj.Spec.BillingMode = devpilotv1alpha1.BillingModeOnDemand
 	}
+	if obj.Spec.Access.SSH != nil && obj.Spec.Access.SSH.Username == "" {
+		obj.Spec.Access.SSH.Username = "root"
+	}
 	return nil
 }
 

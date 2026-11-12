@@ -56,6 +56,10 @@ func run(args []string, stderr *os.File) int {
 		gracePeriod time.Duration
 		flush       bool
 		rebase      bool
+		sshListen   string
+		sshHostKey  string
+		sshAuthKeys string
+		sshShell    string
 	)
 	fs.StringVar(&installPath, "install", "",
 		"Copy this binary to the given path and exit; used by the init container that populates the shared volume.")
@@ -73,6 +77,14 @@ func run(args []string, stderr *os.File) int {
 		"Discard upper/ and pin the pod's base image as the new lower layer; set by the operator after a rebase commit.")
 	fs.BoolVar(&flush, "flush", false,
 		"Flush the root filesystem and exit; used by the operator before taking an online commit snapshot.")
+	fs.StringVar(&sshListen, "ssh-listen", "",
+		"Address the built-in SSH server binds, e.g. \":22\"; empty disables it.")
+	fs.StringVar(&sshHostKey, "ssh-host-key", "",
+		"Path to the OpenSSH private host key; defaults to <ssh-dir>/ssh_host_ed25519_key.")
+	fs.StringVar(&sshAuthKeys, "ssh-authorized-keys", "",
+		"Path to the authorized_keys file; defaults to <ssh-dir>/authorized_keys.")
+	fs.StringVar(&sshShell, "ssh-shell", "",
+		"Login shell for SSH sessions; empty means /bin/bash.")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -106,6 +118,18 @@ func run(args []string, stderr *os.File) int {
 		argv = initroot.DefaultCommand
 	}
 
+	// A nil SSH leaves the image to run its own sshd, which is the case for
+	// every DevBox whose spec.access.ssh is absent.
+	var sshOptions *initroot.SSHOptions
+	if sshListen != "" {
+		sshOptions = &initroot.SSHOptions{
+			Listen:             sshListen,
+			HostKeyPath:        sshHostKey,
+			AuthorizedKeysPath: sshAuthKeys,
+			Shell:              sshShell,
+		}
+	}
+
 	code, err := initroot.Boot(initroot.BootOptions{
 		Root:        root,
 		ImageRef:    imageRef,
@@ -114,6 +138,7 @@ func run(args []string, stderr *os.File) int {
 		Rebase:      rebase,
 		GracePeriod: gracePeriod,
 		Command:     initroot.Command{Path: argv[0], Args: argv[1:]},
+		SSH:         sshOptions,
 		Logf:        logf,
 	})
 	if err != nil {

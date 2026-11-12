@@ -32,6 +32,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// ptyEOF is the terminal driver's end-of-file character (Ctrl-D). Writing it is
+// how a client that has nothing more to send says so without hanging up.
+const ptyEOF = 0x04
+
 // Config describes the built-in server. It exists because a devbox image may
 // carry no sshd at all (the NVIDIA PyTorch images ship none), and the user must
 // still be able to open a session.
@@ -227,6 +231,7 @@ func session(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Requ
 	var (
 		term     string
 		dims     *pty.Winsize
+		ptyReq   bool
 		spec     sessionSpec
 		started  bool
 		finished = make(chan struct{})
@@ -247,7 +252,11 @@ func session(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Requ
 			}
 			switch req.Type {
 			case "pty-req":
+				// The request itself, not the size, is what asks for a terminal:
+				// `ssh -tt` from a script sends 0x0, and treating that as "no
+				// PTY" silently downgrades the session to a pipe.
 				term, dims = parsePTYRequest(req.Payload)
+				ptyReq = true
 				_ = req.Reply(true, nil)
 			case "env":
 				// Accepted so clients do not fail; the server's environment is
@@ -265,7 +274,7 @@ func session(ctx context.Context, channel ssh.Channel, requests <-chan *ssh.Requ
 				}
 				started = true
 				_ = req.Reply(true, nil)
-				spec = sessionSpec{term: term, dims: dims, user: user}
+				spec = sessionSpec{term: term, dims: dims, user: user, pty: ptyReq}
 				if req.Type == "exec" {
 					spec.command = parseString(req.Payload)
 				}
@@ -288,6 +297,9 @@ type sessionSpec struct {
 	term    string
 	dims    *pty.Winsize
 	user    string
+	// pty records that the client sent pty-req, which is what makes a session
+	// interactive even when it left the size at zero.
+	pty bool
 }
 
 // runShell starts the shell, pumps bytes both ways and returns the exit status,
@@ -313,7 +325,7 @@ func runShell(
 	// inherited working directory rather than failing every command.
 	cmd.Dir = workDir(cfg.Env)
 
-	if spec.dims == nil && spec.command != "" {
+	if !spec.pty && spec.command != "" {
 		// No PTY: a plain command run, where stderr stays separate from stdout.
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = channel, channel, channel.Stderr()
 		return exitCode(cmd.Run(), logf, spec)
@@ -324,17 +336,26 @@ func runShell(
 		logf("Could not start a PTY", "user", spec.user, "err", err.Error())
 		return 1
 	}
-	termFile.attach(ptmx, spec.dims)
+	// A zero size from the client would leave the kernel default of 0x0, which
+	// makes the shell's line editor unusable, so fall back to a normal terminal.
+	dims := spec.dims
+	if dims == nil {
+		dims = &pty.Winsize{Cols: 80, Rows: 24}
+	}
+	termFile.attach(ptmx, dims)
 	defer func() {
 		termFile.attach(nil, nil)
 		_ = ptmx.Close()
 	}()
 
-	// Client to shell. Closing the PTY on EOF sends the shell a SIGHUP, which is
-	// what a dropped connection does to a real SSH session.
+	// Client to shell. End of input is the terminal's own end-of-file character
+	// rather than closing the master: closing it sends the shell a SIGHUP, which
+	// kills a command that has already produced its output — `ssh -tt host cmd`
+	// from a script closes its stdin immediately, so the shell must be allowed to
+	// run to completion.
 	go func() {
 		_, _ = io.Copy(ptmx, channel)
-		_ = ptmx.Close()
+		_, _ = ptmx.Write([]byte{ptyEOF})
 	}()
 	_, _ = io.Copy(channel, ptmx)
 

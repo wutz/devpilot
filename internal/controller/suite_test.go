@@ -26,6 +26,9 @@ import (
 	. "github.com/onsi/gomega"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	nodev1 "k8s.io/api/node/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -91,6 +94,23 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	By("creating the cluster scoped fixtures every spec needs")
+	// The API server rejects pods naming an absent RuntimeClass; the GPU nodes
+	// on the dev cluster provide the real one through the NVIDIA operator.
+	Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, &nodev1.RuntimeClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "nvidia"},
+		Handler:    "nvidia",
+	}))).To(Succeed())
+
+	// Envtest ships no storage class, and the API server only allows a claim
+	// to grow when its class opts into expansion.
+	expand := true
+	Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, &storagev1.StorageClass{
+		ObjectMeta:           metav1.ObjectMeta{Name: testStorageClassNVMe},
+		Provisioner:          "example.com/fake",
+		AllowVolumeExpansion: &expand,
+	}))).To(Succeed())
 })
 
 var _ = AfterSuite(func() {

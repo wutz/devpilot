@@ -21,8 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	nodev1 "k8s.io/api/node/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -133,26 +131,6 @@ var _ = Describe("DevBox Controller", func() {
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 		resolver = newTestResolver()
 		r = newTestReconciler(resolver)
-	})
-
-	BeforeEach(func() {
-		// The API server rejects pods naming an absent RuntimeClass; the GPU
-		// nodes on bz1-dev1 provide the real one through the NVIDIA operator.
-		runtimeClass := &nodev1.RuntimeClass{
-			ObjectMeta: metav1.ObjectMeta{Name: "nvidia"},
-			Handler:    "nvidia",
-		}
-		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, runtimeClass))).To(Succeed())
-
-		// Envtest ships no storage class, and the API server only allows a
-		// claim to grow when its class opts into expansion.
-		expand := true
-		storageClass := &storagev1.StorageClass{
-			ObjectMeta:           metav1.ObjectMeta{Name: testStorageClassNVMe},
-			Provisioner:          "example.com/fake",
-			AllowVolumeExpansion: &expand,
-		}
-		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, storageClass))).To(Succeed())
 	})
 
 	AfterEach(func() {

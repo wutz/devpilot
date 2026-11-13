@@ -28,12 +28,25 @@ import (
 // shutdownTimeout bounds the wait for in-flight requests on shutdown.
 const shutdownTimeout = 10 * time.Second
 
+// consoleRunnable runs the console on every replica. A plain RunnableFunc
+// would be leader-elected, so only the leader would listen and a Service in
+// front of several replicas would refuse connections to the rest. The console
+// holds no state and acts as its caller, so any replica can serve it.
+type consoleRunnable struct {
+	manager.Runnable
+}
+
+// NeedLeaderElection opts the console out of leader election.
+func (consoleRunnable) NeedLeaderElection() bool {
+	return false
+}
+
 // NewRunnable binds the console to address for as long as the manager runs.
 //
 // It is added to the manager rather than started beside it so that a bind
 // failure takes the manager down and the listener stops with it.
 func NewRunnable(server *Server, address string) manager.Runnable {
-	return manager.RunnableFunc(func(ctx context.Context) error {
+	return consoleRunnable{Runnable: manager.RunnableFunc(func(ctx context.Context) error {
 		httpServer := &http.Server{
 			Addr:              address,
 			Handler:           server,
@@ -60,5 +73,5 @@ func NewRunnable(server *Server, address string) manager.Runnable {
 			defer cancel()
 			return httpServer.Shutdown(shutdownCtx)
 		}
-	})
+	})}
 }

@@ -31,6 +31,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 )
@@ -348,6 +349,19 @@ func TestStaticConsoleIsServed(t *testing.T) {
 	}
 	if body := recorder.Body.String(); !strings.Contains(body, "DevPilot 控制台") {
 		t.Fatal("index does not look like the console")
+	}
+}
+
+// Every replica must serve the console, so its runnable must not wait for the
+// leader lease; a leader-only listener breaks any Service over several pods.
+func TestConsoleRunsOnEveryReplica(t *testing.T) {
+	runnable := NewRunnable(New(runtime.NewScheme(), nil, logr.Discard()), ":0")
+	leaderAware, ok := runnable.(manager.LeaderElectionRunnable)
+	if !ok {
+		t.Fatalf("console runnable does not implement LeaderElectionRunnable")
+	}
+	if leaderAware.NeedLeaderElection() {
+		t.Fatalf("console runnable needs leader election; only the leader would serve it")
 	}
 }
 

@@ -80,9 +80,12 @@ metrics:
     additionalLabels: {}
 
 webhook:
-  # Admission webhook for spec validation and defaults.
+  # Admission webhook for spec validation and defaults. When enabled the
+  # manager serves it on port with the certificate from secretName, which must
+  # hold tls.crt and tls.key (cert-manager issues one for the webhook Service).
   enabled: false
   port: 9443
+  secretName: webhook-server-cert
 
 # Optional web console served by the manager itself.
 #
@@ -108,6 +111,10 @@ dashboard:
 namespaceOverride: ""
 
 env: []
+
+# Extra manager arguments appended after the chart-generated ones, for flags
+# the chart does not model yet (e.g. --ingress-class=nginx).
+extraArgs: []
 
 nodeSelector: {}
 tolerations: []

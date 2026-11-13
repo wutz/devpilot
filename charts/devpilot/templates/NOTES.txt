@@ -1,0 +1,22 @@
+{{- if .Values.dashboard.enabled }}
+{{- $namespace := .Values.namespaceOverride | default .Release.Namespace }}
+{{- $port := .Values.dashboard.service.port }}
+{{- /* Keep the default in step with DefaultTokenCommand in internal/dashboard/server.go. */ -}}
+{{- $command := .Values.dashboard.tokenCommand | default "kubectl -n {namespace} create token <serviceaccount> --duration=1h" }}
+
+DevPilot web console
+
+{{- if eq .Values.dashboard.service.type "ClusterIP" }}
+Open it with a port-forward, then browse to http://localhost:{{ $port }}:
+
+  kubectl -n {{ $namespace }} port-forward svc/{{ include "devpilot.fullname" . }}-dashboard {{ $port }}:{{ $port }}
+{{- else }}
+It is exposed as a {{ .Values.dashboard.service.type }} Service on port {{ $port }}.
+{{- end }}
+
+Paste a bearer token into the top bar. Get one with (replace any <placeholders>):
+
+  {{ $command | replace "{namespace}" "<namespace>" }}
+
+The console acts with the token's own permissions, so it can only do what that identity may do.
+{{- end }}

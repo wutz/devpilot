@@ -100,6 +100,12 @@ dashboard:
   # Service target port. Empty is refused when enabled, since it would leave
   # the Service pointing at a listener that never opened.
   bindAddress: ":8082"
+  # Command the console suggests for fetching a bearer token, with {namespace}
+  # standing for the namespace in view. Empty suggests kubectl create token for
+  # a ServiceAccount, which carries that ServiceAccount's permissions rather than
+  # a person's. Clusters where people sign in with OIDC should name their login
+  # helper here, so the token the console uses is the person's own.
+  tokenCommand: ""
   service:
     # ClusterIP keeps the console inside the cluster; switch to NodePort or
     # LoadBalancer only behind an authenticating proxy.

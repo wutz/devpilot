@@ -38,6 +38,7 @@
 
   header.bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 16px;
     padding: 12px 24px;
@@ -57,6 +58,7 @@
     color: var(--mute);
   }
   .spacer { flex: 1; }
+  header.bar .eyebrow { white-space: nowrap; }
 
   input[type="text"], input[type="password"], select {
     background: var(--elevated);
@@ -199,6 +201,47 @@
   }
   .toast.show { opacity: 1; }
   .toast.error { background: var(--error); }
+
+  .identity {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    background: var(--elevated);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    color: var(--body);
+  }
+  .identity[hidden] { display: none; }
+  .identity .who { color: var(--ink); font-weight: 500; }
+  .identity .perms { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill.allowed { color: #0a7b5f; border-color: #cdeee4; background: #f2fbf8; }
+  .pill.denied { color: var(--mute); }
+  .pill.unknown { color: var(--faint); }
+  .notice.guide {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .guide ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+  .guide button { align-self: flex-start; }
+  .command {
+    margin: 0;
+    padding: 12px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 18px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--ink);
+  }
+  .dialog-copy { color: var(--mute); font-size: 12px; margin: 0 0 12px; }
 </style>
 </head>
 <body>
@@ -208,10 +251,12 @@
   <span class="spacer"></span>
   <input id="namespace" type="text" placeholder="命名空间（留空为全部）" aria-label="命名空间">
   <input id="token" type="password" placeholder="Bearer Token" aria-label="Bearer Token" autocomplete="off">
+  <button id="token-help" type="button">怎么拿？</button>
   <button id="refresh" class="primary">刷新</button>
 </header>
 
 <main>
+  <div id="identity" class="identity" hidden></div>
   <div id="status-line" class="eyebrow" style="margin-bottom:16px"></div>
   <div id="content" class="grid" aria-live="polite"></div>
 </main>
@@ -275,14 +320,36 @@
   </div>
 </dialog>
 
+<dialog id="token-dialog">
+  <div class="dialog-body">
+    <div class="dialog-head">
+      <span class="card-title">获取 Bearer Token</span>
+    </div>
+    <p class="dialog-copy">在能访问集群的终端执行下面的命令，把输出的字符串粘贴到页面顶部的 Bearer Token 输入框。Token 代表你本人的权限，请勿分享给他人。</p>
+    <pre id="token-command" class="command" aria-label="获取 Token 的命令"></pre>
+    <p class="dialog-copy">命名空间取自顶部输入框，未填写时显示为 &lt;namespace&gt;；其余占位符（如 &lt;serviceaccount&gt;）请替换成实际值。</p>
+    <div class="dialog-actions">
+      <button type="button" id="token-copy">复制命令</button>
+      <button type="button" class="primary" id="token-done">完成</button>
+    </div>
+  </div>
+</dialog>
+
 <div id="toast" class="toast" role="status"></div>
 
 <script>
 (() => {
   "use strict";
-  const state = { items: [], busy: new Set(), commitTarget: null };
+  // The view on screen reflects the last refresh, not whatever is typed since.
+  const state = {
+    hasToken: false, items: [], busy: new Set(), commitTarget: null, tokenCommand: null,
+    who: null, perm: null, claims: null, scope: "", error: null
+  };
+  // expiredShown records whether the cards on screen were drawn with a lapsed token.
+  let expiredShown = false;
 
   const content = document.getElementById("content");
+  const identity = document.getElementById("identity");
   const statusLine = document.getElementById("status-line");
   const namespaceInput = document.getElementById("namespace");
   const tokenInput = document.getElementById("token");
@@ -298,8 +365,13 @@
     notify.timer = setTimeout(() => { toast.className = "toast"; }, 4000);
   }
 
+  // A pasted header such as "Bearer abc" is reduced to the bare token.
+  function currentToken() {
+    return tokenInput.value.trim().replace(/^Bearer\s+/i, "").trim();
+  }
+
   function authHeaders() {
-    const token = tokenInput.value.trim();
+    const token = currentToken();
     return token ? { Authorization: "Bearer " + token } : {};
   }
 
@@ -346,13 +418,122 @@
     return date.toLocaleString("zh-CN", { hour12: false });
   }
 
+  // decodeClaims reads a JWT payload for display only. Nothing here verifies the
+  // signature; the API server does that on every request.
+  function decodeClaims(token) {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    try {
+      const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const binary = atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4));
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function tokenExpired() {
+    const exp = state.claims && state.claims.exp;
+    return typeof exp === "number" && Date.now() >= exp * 1000;
+  }
+
+  // renderIdentity shows who the token belongs to, when it lapses, and which
+  // console actions the API server says it may take in the namespace in view.
+  function renderIdentity() {
+    identity.textContent = "";
+    if (!state.hasToken) {
+      identity.hidden = true;
+      return;
+    }
+    identity.hidden = false;
+    // The API server's answer comes first: it is the name RBAC matches. The
+    // token's own claims are only a fallback for clusters that do not answer.
+    const claims = state.claims || {};
+    const name = (state.who && state.who.username)
+      || claims.preferred_username || claims.email || claims.name || claims.sub || "身份未知";
+    identity.append(el("span", "who", name));
+
+    if (typeof claims.exp === "number") {
+      const remaining = claims.exp * 1000 - Date.now();
+      if (remaining <= 0) {
+        identity.append(el("span", "pill failed", "已过期，请重新获取"));
+      } else if (remaining < 10 * 60 * 1000) {
+        identity.append(el("span", "pill starting", "即将过期：" + formatSeconds(Math.floor(remaining / 1000)) + "后"));
+      } else {
+        identity.append(el("span", "pill", formatSeconds(Math.floor(remaining / 1000)) + "后过期"));
+      }
+    } else {
+      identity.append(el("span", "pill", "无过期时间"));
+    }
+
+    identity.append(el("span", "mono", "命名空间 " + (state.scope || "全部")));
+
+    const perms = el("div", "perms");
+    for (const [label, key] of [["查看", "list"], ["开关机", "power"], ["保存镜像", "commit"]]) {
+      if (!state.perm) {
+        perms.append(el("span", "pill unknown", label + " · 未检查"));
+      } else if (state.perm[key]) {
+        perms.append(el("span", "pill allowed", label + " · 有权限"));
+      } else {
+        perms.append(el("span", "pill denied", label + " · 无权限"));
+      }
+    }
+    identity.append(perms);
+
+    if (state.perm && !state.perm.list && !state.scope) {
+      identity.append(el("span", "", "查看全部命名空间需要集群级权限，请填写命名空间。"));
+    }
+  }
+
   function metaRow(list, term, value, mono) {
     if (!value) return;
     list.append(el("dt", "", term), el("dd", mono ? "mono" : "", value));
   }
 
+  // guideCard is the first-run view: where a token comes from and what to do
+  // with it, shown until a token has been pasted.
+  function guideCard() {
+    const guide = el("div", "notice guide");
+    guide.append(el("strong", "", "还没有 Bearer Token"));
+    const steps = el("ol");
+    for (const text of [
+      "点击「怎么拿？」，在终端执行弹窗里的命令",
+      "把输出的字符串粘贴到上方的 Bearer Token 输入框",
+      "点击「刷新」，这里会显示你的身份和可执行的操作"
+    ]) {
+      steps.append(el("li", "", text));
+    }
+    guide.append(steps);
+    const open = el("button", "primary", "查看获取命令");
+    open.type = "button";
+    open.addEventListener("click", openTokenDialog);
+    guide.append(open);
+    return guide;
+  }
+
   function render() {
+    renderIdentity();
+    expiredShown = tokenExpired();
     content.textContent = "";
+    if (!state.hasToken) {
+      content.append(guideCard());
+      return;
+    }
+    if (expiredShown) {
+      const expired = el("div", "notice");
+      expired.append(el("strong", "", "Token 已过期"));
+      expired.append(el("span", "", "重新获取 Token 并粘贴后点击刷新。"));
+      content.append(expired);
+      return;
+    }
+    if (state.error) {
+      const failed = el("div", "notice");
+      failed.append(el("strong", "", "无法读取实例"));
+      failed.append(el("span", "", state.error));
+      content.append(failed);
+      return;
+    }
     if (state.items.length === 0) {
       const empty = el("div", "notice");
       empty.append(el("strong", "", "没有找到实例"));
@@ -402,11 +583,19 @@
     const actions = el("div", "actions");
     const running = box.desiredState === "Running";
     const toggle = el("button", running ? "" : "primary", running ? "关机" : "开机");
-    toggle.disabled = state.busy.has(box.namespace + "/" + box.name);
+    toggle.disabled = state.busy.has(box.namespace + "/" + box.name) || tokenExpired();
+    if (state.perm && !state.perm.power) {
+      toggle.disabled = true;
+      toggle.title = "当前身份在该命名空间没有开关机权限";
+    }
     toggle.addEventListener("click", () => power(box, running ? "Stopped" : "Running"));
     actions.append(toggle);
 
     const commit = el("button", "", "保存镜像");
+    commit.disabled = tokenExpired() || Boolean(state.perm && !state.perm.commit);
+    if (state.perm && !state.perm.commit) {
+      commit.title = "当前身份在该命名空间没有保存镜像的权限";
+    }
     commit.addEventListener("click", () => openCommit(box));
     actions.append(commit);
 
@@ -505,33 +694,114 @@
     billingDialog.showModal();
   }
 
+  // load reads the devboxes together with who the token belongs to and what it
+  // may do in the namespace in view. The two calls are independent: a failed
+  // permission check still shows the list, and a failed list still shows who.
   async function load() {
-    if (!tokenInput.value.trim()) {
-      state.items = [];
+    const token = currentToken();
+    const namespace = namespaceInput.value.trim();
+    tokenInput.value = token;
+    sessionStorage.setItem("devpilot-namespace", namespace);
+    if (!token) {
+      sessionStorage.removeItem("devpilot-token");
+      Object.assign(state, { hasToken: false, items: [], error: null, who: null, perm: null, claims: null, scope: "" });
       render();
       statusLine.textContent = "填入 Bearer Token 后刷新";
       return;
     }
-    sessionStorage.setItem("devpilot-token", tokenInput.value.trim());
-    sessionStorage.setItem("devpilot-namespace", namespaceInput.value.trim());
-    statusLine.textContent = "加载中…";
-    try {
-      const namespace = namespaceInput.value.trim();
-      const data = await api("/api/devboxes" + (namespace ? "?namespace=" + encodeURIComponent(namespace) : ""));
-      state.items = data.items || [];
+    sessionStorage.setItem("devpilot-token", token);
+    Object.assign(state, { hasToken: true, claims: decodeClaims(token), scope: namespace });
+    if (tokenExpired()) {
+      // An expired token would only earn a 401, so skip the round trip.
+      Object.assign(state, { items: [], error: null, who: null, perm: null });
       render();
-      statusLine.textContent = "共 " + state.items.length + " 个实例 · " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
-    } catch (error) {
-      state.items = [];
-      render();
-      statusLine.textContent = "读取失败：" + error.message;
-      notify("读取失败：" + error.message, true);
+      statusLine.textContent = "Token 已过期，请重新获取";
+      return;
     }
+    statusLine.textContent = "加载中…";
+    const query = namespace ? "?namespace=" + encodeURIComponent(namespace) : "";
+    const [who, boxes] = await Promise.allSettled([
+      api("/api/whoami" + query),
+      api("/api/devboxes" + query)
+    ]);
+    state.who = who.status === "fulfilled" ? who.value : null;
+    state.perm = state.who ? state.who.permissions : null;
+    state.items = boxes.status === "fulfilled" ? boxes.value.items || [] : [];
+    state.error = boxes.status === "fulfilled" ? null : boxes.reason.message;
+    render();
+    if (state.error) {
+      statusLine.textContent = "读取失败：" + state.error;
+      notify("读取失败：" + state.error, true);
+      return;
+    }
+    statusLine.textContent = "共 " + state.items.length + " 个实例 · " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
   }
 
   document.getElementById("refresh").addEventListener("click", load);
   namespaceInput.addEventListener("keydown", (event) => { if (event.key === "Enter") load(); });
   tokenInput.addEventListener("keydown", (event) => { if (event.key === "Enter") load(); });
+  document.getElementById("token-help").addEventListener("click", openTokenDialog);
+
+  const tokenDialog = document.getElementById("token-dialog");
+  const tokenCommandBlock = document.getElementById("token-command");
+  document.getElementById("token-done").addEventListener("click", () => tokenDialog.close());
+  const tokenCopy = document.getElementById("token-copy");
+  tokenCopy.addEventListener("click", copyTokenCommand);
+
+  // tokenCommandText fills the configured template with the namespace in view.
+  // Only a valid namespace name is substituted, so the copied line stays safe
+  // to paste into a shell; anything else leaves a visible placeholder.
+  function tokenCommandText() {
+    if (!state.tokenCommand) return "";
+    const namespace = namespaceInput.value.trim();
+    const value = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(namespace) ? namespace : "<namespace>";
+    return state.tokenCommand.split("{namespace}").join(value);
+  }
+
+  async function openTokenDialog() {
+    if (!state.tokenCommand) await loadConfig();
+    tokenCommandBlock.textContent = state.tokenCommand ? tokenCommandText() : "无法读取获取命令，请确认控制台版本。";
+    tokenCopy.disabled = !state.tokenCommand;
+    tokenDialog.showModal();
+  }
+
+  async function copyTokenCommand() {
+    const text = tokenCommandText();
+    if (!text) return;
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (error) {
+      // Plain-http pages have no clipboard API: select the text so the
+      // browser's own copy command can take it.
+      const range = document.createRange();
+      range.selectNodeContents(tokenCommandBlock);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      copied = document.execCommand("copy");
+    }
+    notify(copied ? "已复制获取命令" : "无法自动复制，请手动选中命令后复制", !copied);
+  }
+
+  async function loadConfig() {
+    try {
+      const config = await api("/api/config");
+      state.tokenCommand = config.tokenCommand || null;
+    } catch (error) {
+      state.tokenCommand = null;
+    }
+  }
+
+  // The countdown in the identity line ticks, and the cards redraw once the
+  // token lapses so the actions lock without a manual refresh.
+  setInterval(() => {
+    renderIdentity();
+    if (tokenExpired() !== expiredShown) render();
+  }, 30000);
+
+  loadConfig();
 
   load();
 })();

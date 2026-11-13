@@ -52,6 +52,26 @@ kubectl -n devpilot-system port-forward svc/devpilot-dashboard 8082:8082
 
 `dashboard.bindAddress`（默认 `:8082`）同时决定监听端口与 Service 的 `targetPort`；置空但 `enabled: true` 会直接渲染失败，避免 Service 指向一个从未监听的端口。控制台本身不校验 token 是谁，只校验有没有传，所以对外暴露时务必套一层认证（Ingress + OIDC 过滤器等），而不是裸放 `LoadBalancer`。
 
+### 取 Token
+
+安装后 `helm` 的 NOTES 会打印端口转发命令和获取 Token 的命令。页面顶部的「怎么拿？」按钮弹出同样的命令，「复制命令」可以一键复制。把命令输出的字符串粘贴到 Bearer Token 输入框，点击「刷新」后，页面会显示这个 Token 的身份、过期时间，以及它在所选命名空间里能否查看、开关机、保存镜像。
+
+默认给出的是 ServiceAccount 的 Token 命令：
+
+```bash
+kubectl -n <namespace> create token <serviceaccount> --duration=1h
+```
+
+这种 Token 带的是 ServiceAccount 的权限，不是你本人的。集群用 OIDC 登录时，请把你们的登录命令配进 `dashboard.tokenCommand`，这样拿到的就是你自己的 Token。`{namespace}` 会替换成页面里当前的命名空间，不需要时可以省略：
+
+```bash
+helm upgrade --install devpilot oci://ghcr.io/wutz/charts/devpilot \
+  --namespace devpilot-system --set dashboard.enabled=true \
+  --set-string 'dashboard.tokenCommand=<你的登录命令> --namespace {namespace}'
+```
+
+直接运行管理器时对应的参数是 `--dashboard-token-command`。
+
 ## 文档目录
 
 - [架构总览与方案选型](docs/architecture.md) — 方案对比、整体拓扑、关键设计决策（D1–D12）与核心工作流

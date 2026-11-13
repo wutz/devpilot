@@ -53,6 +53,9 @@ spec:
             - --build-namespace-suffix={{ .Values.build.namespaceSuffix | quote }}
             {{- if .Values.dashboard.enabled }}
             - --dashboard-bind-address={{ .Values.dashboard.bindAddress }}
+            {{- with .Values.dashboard.tokenCommand }}
+            - {{ printf "--dashboard-token-command=%s" . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.webhook.enabled }}
             - --webhook-port={{ .Values.webhook.port }}

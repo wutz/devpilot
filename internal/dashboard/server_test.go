@@ -19,18 +19,22 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
@@ -44,10 +48,18 @@ const (
 	testBox       = "gpu-box"
 	// testCost is the price of the fixture's closed billing segment.
 	testCost = "4.20"
+	// testUser is the identity the reviewer reports for every token.
+	testUser = "alice@example.com"
 )
 
 // newServer builds a console over a fake client and records the tokens it saw.
 func newServer(t *testing.T, objects ...client.Object) (*Server, *[]string) {
+	t.Helper()
+	return newServerWith(t, interceptor.Funcs{}, objects...)
+}
+
+// newServerWith is newServer with interceptors on its fake client.
+func newServerWith(t *testing.T, funcs interceptor.Funcs, objects ...client.Object) (*Server, *[]string) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -56,7 +68,7 @@ func newServer(t *testing.T, objects ...client.Object) (*Server, *[]string) {
 	if err := devpilotv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add devpilot scheme: %v", err)
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithInterceptorFuncs(funcs).Build()
 	seen := &[]string{}
 	server := New(scheme, nil, logr.Discard())
 	server.ClientFor = func(_ context.Context, token string) (client.Client, error) {
@@ -362,6 +374,152 @@ func TestConsoleRunsOnEveryReplica(t *testing.T) {
 	}
 	if leaderAware.NeedLeaderElection() {
 		t.Fatalf("console runnable needs leader election; only the leader would serve it")
+	}
+}
+
+// reviewer answers the caller's self-reviews from allowed and records every
+// access it is asked about. Every token authenticates as testUser.
+func reviewer(allowed func(*authorizationv1.ResourceAttributes) bool, asked *[]authorizationv1.ResourceAttributes) interceptor.Funcs {
+	return interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			switch review := obj.(type) {
+			case *authorizationv1.SelfSubjectAccessReview:
+				*asked = append(*asked, *review.Spec.ResourceAttributes)
+				review.Status.Allowed = allowed(review.Spec.ResourceAttributes)
+				return nil
+			case *authenticationv1.SelfSubjectReview:
+				review.Status.UserInfo.Username = testUser
+				return nil
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}
+}
+
+// decodeWhoami reads a whoami response.
+func decodeWhoami(t *testing.T, recorder *httptest.ResponseRecorder) whoamiView {
+	t.Helper()
+	var view whoamiView
+	if err := json.Unmarshal(recorder.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return view
+}
+
+func TestConfigNeedsNoTokenAndSuggestsTheDefault(t *testing.T) {
+	server, seen := newServer(t)
+	recorder := call(server, http.MethodGet, "/api/config", "", false)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["tokenCommand"] != DefaultTokenCommand {
+		t.Fatalf("tokenCommand = %q, want the default", body["tokenCommand"])
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("a client was built for the config: %v", *seen)
+	}
+}
+
+func TestConfigServesTheConfiguredTokenCommand(t *testing.T) {
+	server, _ := newServer(t)
+	server.TokenCommand = "oidc-login --namespace {namespace}"
+	recorder := call(server, http.MethodGet, "/api/config", "", false)
+	var body map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["tokenCommand"] != "oidc-login --namespace {namespace}" {
+		t.Fatalf("tokenCommand = %q", body["tokenCommand"])
+	}
+}
+
+func TestWhoamiRequiresAToken(t *testing.T) {
+	server, seen := newServer(t)
+	recorder := call(server, http.MethodGet, "/api/whoami?namespace="+testNamespace, "", false)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("a client was built without a token: %v", *seen)
+	}
+}
+
+func TestWhoamiReportsWhatTheCallerMayDoInTheNamespace(t *testing.T) {
+	var asked []authorizationv1.ResourceAttributes
+	// The caller may read and save images but may not power devboxes.
+	allowed := func(attrs *authorizationv1.ResourceAttributes) bool { return attrs.Verb != "patch" }
+	server, _ := newServerWith(t, reviewer(allowed, &asked))
+
+	recorder := call(server, http.MethodGet, "/api/whoami?namespace="+testNamespace, "", true)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	view := decodeWhoami(t, recorder)
+	if view.Username != testUser || view.Namespace != testNamespace {
+		t.Fatalf("view = %+v", view)
+	}
+	if want := (permissionsView{List: true, Power: false, Commit: true}); view.Permissions != want {
+		t.Fatalf("permissions = %+v, want %+v", view.Permissions, want)
+	}
+	wantAccess := []string{"list devboxes", "patch devboxes", "create devboxcommits"}
+	if len(asked) != len(wantAccess) {
+		t.Fatalf("asked %d accesses, want %d", len(asked), len(wantAccess))
+	}
+	for i, attrs := range asked {
+		if got := attrs.Verb + " " + attrs.Resource; got != wantAccess[i] {
+			t.Fatalf("access %d = %q, want %q", i, got, wantAccess[i])
+		}
+		if attrs.Namespace != testNamespace || attrs.Group != devpilotv1alpha1.GroupVersion.Group {
+			t.Fatalf("access %d = %+v", i, attrs)
+		}
+	}
+}
+
+func TestWhoamiChecksTheWholeClusterWhenNoNamespaceIsGiven(t *testing.T) {
+	var asked []authorizationv1.ResourceAttributes
+	server, _ := newServerWith(t, reviewer(func(*authorizationv1.ResourceAttributes) bool { return false }, &asked))
+
+	recorder := call(server, http.MethodGet, "/api/whoami", "", true)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	for _, attrs := range asked {
+		if attrs.Namespace != "" {
+			t.Fatalf("namespace = %q, want a cluster-wide check", attrs.Namespace)
+		}
+	}
+	if view := decodeWhoami(t, recorder); view.Permissions != (permissionsView{}) {
+		t.Fatalf("permissions = %+v, want none", view.Permissions)
+	}
+}
+
+func TestWhoamiLeavesTheNameOutWhenTheClusterWillNotSayIt(t *testing.T) {
+	var asked []authorizationv1.ResourceAttributes
+	base := reviewer(func(*authorizationv1.ResourceAttributes) bool { return true }, &asked)
+	funcs := interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*authenticationv1.SelfSubjectReview); ok {
+				return errors.New("selfsubjectreviews is not served")
+			}
+			return base.Create(ctx, c, obj, opts...)
+		},
+	}
+	server, _ := newServerWith(t, funcs)
+
+	recorder := call(server, http.MethodGet, "/api/whoami?namespace="+testNamespace, "", true)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	view := decodeWhoami(t, recorder)
+	if view.Username != "" {
+		t.Fatalf("username = %q, want none", view.Username)
+	}
+	if view.Permissions != (permissionsView{List: true, Power: true, Commit: true}) {
+		t.Fatalf("permissions = %+v", view.Permissions)
 	}
 }
 

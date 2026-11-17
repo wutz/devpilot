@@ -36,6 +36,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -50,6 +52,11 @@ var assetTree embed.FS
 // maxBodyBytes bounds a request body; every action body is a few hundred bytes.
 const maxBodyBytes = 64 << 10
 
+// DefaultTokenCommand is the command the console suggests for fetching a token
+// when none is configured. It is a ServiceAccount token, the one form every
+// cluster can issue; OIDC clusters configure their own login helper instead.
+const DefaultTokenCommand = "kubectl -n {namespace} create token <serviceaccount> --duration=1h"
+
 // Server is the console's HTTP API and static file handler.
 type Server struct {
 	// Scheme knows the DevPilot types.
@@ -60,6 +67,10 @@ type Server struct {
 	// ClientFor builds the caller's client. It is injectable so tests can use
 	// a fake client without an API server.
 	ClientFor func(ctx context.Context, token string) (client.Client, error)
+	// TokenCommand is the command the console suggests for fetching a token;
+	// {namespace} stands for the namespace the user is looking at. Empty means
+	// DefaultTokenCommand.
+	TokenCommand string
 	// Log records failures.
 	Log logr.Logger
 	// Handler serves /api and the embedded console.
@@ -75,6 +86,8 @@ func New(scheme *runtime.Scheme, base *rest.Config, log logr.Logger) *Server {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("GET /api/config", s.handleConfig)
+	mux.HandleFunc("GET /api/whoami", s.handleWhoami)
 	mux.HandleFunc("GET /api/devboxes", s.handleList)
 	mux.HandleFunc("GET /api/devboxes/{namespace}/{name}", s.handleGet)
 	mux.HandleFunc("POST /api/devboxes/{namespace}/{name}/state", s.handleState)
@@ -157,6 +170,98 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, newDevBoxView(box))
+}
+
+// tokenCommand is the configured suggestion, or the default when none is set.
+func (s *Server) tokenCommand() string {
+	if s.TokenCommand != "" {
+		return s.TokenCommand
+	}
+	return DefaultTokenCommand
+}
+
+// handleConfig serves what the console needs before anyone has a token. It
+// carries no secret: the command is a template the user runs with their own
+// credentials.
+func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"tokenCommand": s.tokenCommand()})
+}
+
+// whoamiView says which identity a token authenticates as and which console
+// actions that identity may take in the namespace being viewed.
+type whoamiView struct {
+	Username    string          `json:"username,omitempty"`
+	Namespace   string          `json:"namespace"`
+	Permissions permissionsView `json:"permissions"`
+}
+
+// permissionsView maps the console's actions onto the API verbs they need.
+type permissionsView struct {
+	// List reads devboxes, which is what loading the console does.
+	List bool `json:"list"`
+	// Power patches a devbox's desiredState to turn it on or off.
+	Power bool `json:"power"`
+	// Commit creates a devboxcommit to save an image.
+	Commit bool `json:"commit"`
+}
+
+// handleWhoami asks the API server, as the caller, what the token may do, so
+// the console shows the answer RBAC gives rather than guessing at a role.
+func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
+	view := whoamiView{Namespace: namespace, Username: s.username(ctx, c)}
+	checks := []struct {
+		verb, resource string
+		allowed        *bool
+	}{
+		{"list", "devboxes", &view.Permissions.List},
+		{"patch", "devboxes", &view.Permissions.Power},
+		{"create", "devboxcommits", &view.Permissions.Commit},
+	}
+	for _, check := range checks {
+		allowed, err := selfAccess(ctx, c, namespace, check.verb, check.resource)
+		if err != nil {
+			s.fail(w, err, "Could not check the caller's permissions")
+			return
+		}
+		*check.allowed = allowed
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// username asks who the token authenticates as. It is best effort: a cluster
+// that does not serve the review leaves the name out rather than failing.
+func (s *Server) username(ctx context.Context, c client.Client) string {
+	review := &authenticationv1.SelfSubjectReview{}
+	if err := c.Create(ctx, review); err != nil {
+		s.Log.V(1).Info("Could not read the caller's identity", "error", err.Error())
+		return ""
+	}
+	return review.Status.UserInfo.Username
+}
+
+// selfAccess asks whether the caller may perform verb on a devpilot resource in
+// namespace. An empty namespace asks about the whole cluster.
+func selfAccess(ctx context.Context, c client.Client, namespace, verb, resource string) (bool, error) {
+	review := &authorizationv1.SelfSubjectAccessReview{
+		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationv1.ResourceAttributes{
+				Namespace: namespace,
+				Verb:      verb,
+				Group:     devpilotv1alpha1.GroupVersion.Group,
+				Resource:  resource,
+			},
+		},
+	}
+	if err := c.Create(ctx, review); err != nil {
+		return false, err
+	}
+	return review.Status.Allowed, nil
 }
 
 // stateRequest is the body of the power action.

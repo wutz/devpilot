@@ -82,6 +82,7 @@ func main() {
 	var retentionReclaim string
 	var buildNamespaceSuffix string
 	var dashboardAddr string
+	var dashboardTokenCommand string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -127,6 +128,9 @@ func main() {
 		"Address the optional web console listens on, e.g. :8082. Every request acts "+
 			"with the bearer token it carries, so the console is never more powerful than its caller. "+
 			"Empty disables it.")
+	flag.StringVar(&dashboardTokenCommand, "dashboard-token-command", "",
+		"Command the web console suggests for fetching a bearer token; {namespace} stands for the "+
+			"namespace in view, e.g. a login helper for OIDC users. Empty suggests a ServiceAccount token.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -278,8 +282,10 @@ func main() {
 		}
 	}
 	if dashboardAddr != "" {
-		if err := mgr.Add(dashboard.NewRunnable(dashboard.New(scheme, mgr.GetConfig(),
-			ctrl.Log.WithName("dashboard")), dashboardAddr)); err != nil {
+		console := dashboard.New(scheme, mgr.GetConfig(),
+			ctrl.Log.WithName("dashboard"))
+		console.TokenCommand = dashboardTokenCommand
+		if err := mgr.Add(dashboard.NewRunnable(console, dashboardAddr)); err != nil {
 			setupLog.Error(err, "Failed to create the web console")
 			os.Exit(1)
 		}

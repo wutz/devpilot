@@ -102,6 +102,7 @@ spec:
                 enum:
                 - zstd
                 - gzip
+                - zstd:chunked
                 type: string
               consistency:
                 default: Sync
@@ -139,6 +140,13 @@ spec:
                   type: string
                 maxItems: 128
                 type: array
+              prewarmNode:
+                description: |-
+                  prewarmNode creates a short-lived ImagePrewarm targeting the source
+                  DevBox's last node after a successful push so restarting starts with a
+                  warm local cache. When omitted, it defaults to true when rebaseDevBox is
+                  true and false otherwise.
+                type: boolean
               rebaseDevBox:
                 description: |-
                   rebaseDevBox switches the devbox base to the new image and clears upper/
@@ -246,6 +254,12 @@ spec:
                 - OnlineSnapshot
                 - OnlineSameNode
                 type: string
+              modelCacheBytes:
+                description: |-
+                  modelCacheBytes is the uncompressed size of detected ML model caches
+                  (e.g. ~/.cache/huggingface) in upper/.
+                format: int64
+                type: integer
               observedGeneration:
                 format: int64
                 type: integer

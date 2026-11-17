@@ -19,8 +19,11 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
+
+	apiresource "k8s.io/apimachinery/pkg/api/resource"
 )
 
 // Config carries the operator-wide knobs that are not derived from a DevBox.
@@ -59,6 +62,14 @@ type Config struct {
 	// so project members cannot read a token that pushes to the registry.
 	// Empty keeps the credential in the project namespace.
 	BuildNamespaceSuffix string
+	// PrewarmNamespace is the namespace where cluster-scoped ImagePrewarm
+	// resources create their zero-GPU pre-warm and sentinel Pods. When empty,
+	// DEVPILOT_NAMESPACE or DefaultPrewarmNamespace is used.
+	PrewarmNamespace string
+	// PrepullThresholdBytes is the minimum base image size (sum of manifest
+	// layer sizes) that triggers automatic two-phase GPU-free pre-pulling when
+	// DevBox.spec.scheduling.prepull is Auto. Zero disables Auto pre-pulling.
+	PrepullThresholdBytes int64
 }
 
 // The two ways an expired root disk is reclaimed.
@@ -68,6 +79,14 @@ const (
 	// ReclaimDelete deletes the claim together with the DevBox.
 	ReclaimDelete = "delete"
 )
+
+// DefaultPrewarmNamespace is the fallback namespace for ImagePrewarm pods when
+// neither --prewarm-namespace nor DEVPILOT_NAMESPACE is set.
+const DefaultPrewarmNamespace = "devpilot-system"
+
+// DefaultPrepullThreshold is the default CLI threshold for automatic two-phase
+// GPU-free pre-pulling.
+const DefaultPrepullThreshold = "20Gi"
 
 // DefaultIngressPort is the HTTPS port the generated URLs assume when the
 // operator does not override it.
@@ -96,6 +115,17 @@ func (c Config) BuildNamespaceSuffixMode() string {
 		return ""
 	}
 	return c.BuildNamespaceSuffix
+}
+
+// PrewarmNamespaceOrDefault resolves the namespace for ImagePrewarm pods.
+func (c Config) PrewarmNamespaceOrDefault() string {
+	if ns := strings.TrimSpace(c.PrewarmNamespace); ns != "" {
+		return ns
+	}
+	if ns := strings.TrimSpace(os.Getenv("DEVPILOT_NAMESPACE")); ns != "" {
+		return ns
+	}
+	return DefaultPrewarmNamespace
 }
 
 // ParseSnapshotClassMapping parses "storageClass=snapshotClass,..." into a map.
@@ -173,5 +203,25 @@ func (c Config) Validate() error {
 	if suffix := c.BuildNamespaceSuffix; suffix != "" && !validBuildNamespaceSuffix(suffix) {
 		errs = append(errs, fmt.Errorf("build namespace suffix %q must be a bare DNS suffix such as -build", suffix))
 	}
+	if c.PrepullThresholdBytes < 0 {
+		errs = append(errs, fmt.Errorf("prepull threshold %d must be non-negative", c.PrepullThresholdBytes))
+	}
 	return errors.Join(errs...)
+}
+
+// ParsePrepullThreshold parses a Kubernetes byte quantity string (e.g. "20Gi"
+// or "0") into bytes.
+func ParsePrepullThreshold(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "0" {
+		return 0, nil
+	}
+	q, err := apiresource.ParseQuantity(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse prepull threshold %q: %w", raw, err)
+	}
+	if q.Sign() < 0 {
+		return 0, fmt.Errorf("prepull threshold %q must be non-negative", raw)
+	}
+	return q.Value(), nil
 }

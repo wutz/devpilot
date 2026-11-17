@@ -67,6 +67,7 @@ rules:
   resources:
   - devboxcommits
   - devboxes
+  - imageprewarms
   verbs:
   - create
   - delete
@@ -80,6 +81,7 @@ rules:
   resources:
   - devboxcommits/finalizers
   - devboxes/finalizers
+  - imageprewarms/finalizers
   verbs:
   - update
 - apiGroups:
@@ -87,6 +89,7 @@ rules:
   resources:
   - devboxcommits/status
   - devboxes/status
+  - imageprewarms/status
   verbs:
   - get
   - patch

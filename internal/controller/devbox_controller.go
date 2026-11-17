@@ -179,11 +179,17 @@ func (r *DevBoxReconciler) reconcileLifecycle(ctx context.Context, box *devpilot
 func (r *DevBoxReconciler) reconcileStopped(ctx context.Context, box *devpilotv1alpha1.DevBox, pod *corev1.Pod) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if err := r.deletePrepullPod(ctx, box); err != nil {
+		return ctrl.Result{}, err
+	}
+	box.Status.PrepulledNode = ""
+
 	if pod == nil {
 		if box.Status.Phase != devpilotv1alpha1.PhaseStopped {
 			now := nowUTC()
 			box.Status.Phase = devpilotv1alpha1.PhaseStopped
 			box.Status.StartingStep = devpilotv1alpha1.StartingStepNone
+			box.Status.ImageCacheState = devpilotv1alpha1.ImageCacheStateNone
 			box.Status.PodName = ""
 			box.Status.NodeName = ""
 			box.Status.StoppedAt = &now
@@ -221,6 +227,9 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 		if err := r.deletePod(ctx, pod.Name, box.Namespace); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.deletePrepullPod(ctx, box); err != nil {
+			return ctrl.Result{}, err
+		}
 		log.Info("DevBox interrupted", "pod", pod.Name, "node", box.Status.NodeName, "reason", message)
 		return ctrl.Result{}, nil
 	}
@@ -250,6 +259,9 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 		r.setFailed(ctx, box, "ImageResolutionFailed", err)
 		return ctrl.Result{}, err
 	}
+	if info.TotalSizeBytes > 0 {
+		box.Status.ImageSizeBytes = info.TotalSizeBytes
+	}
 
 	// A pending rebase switches the base image and clears upper/ on this start,
 	// so the pod runs devpilot-init with --rebase. The flag is derived from
@@ -271,13 +283,21 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 		return ctrl.Result{}, err
 	}
 
-	desired, err := r.buildPod(box, pvc, info, rebase)
-	if err != nil {
-		r.setFailed(ctx, box, "PodSpecInvalid", err)
-		return ctrl.Result{}, err
-	}
-
 	if pod == nil {
+		summary, cacheErr := r.inspectImageCache(ctx, box, info, "")
+		if cacheErr != nil {
+			return ctrl.Result{}, cacheErr
+		}
+		done, prepullRes, prepullErr := r.reconcilePrepull(ctx, box, info, summary)
+		if prepullErr != nil || !done {
+			return prepullRes, prepullErr
+		}
+
+		desired, err := r.buildPod(box, pvc, info, rebase)
+		if err != nil {
+			r.setFailed(ctx, box, "PodSpecInvalid", err)
+			return ctrl.Result{}, err
+		}
 		log.Info("Creating DevBox pod", "pod", desired.Name)
 		if err := r.Create(ctx, desired); err != nil && !isAlreadyExists(err) {
 			r.setFailed(ctx, box, "PodCreateFailed", err)
@@ -286,10 +306,16 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 		box.Status.PodName = desired.Name
 		box.Status.Phase = devpilotv1alpha1.PhaseStarting
 		box.Status.StartingStep = devpilotv1alpha1.StartingStepPullingImage
+		box.Status.ImageCacheState = classifyImageCacheState(box, nil, summary)
 		box.Status.Message = "Pulling the base image"
 		return ctrl.Result{RequeueAfter: requeueWhileStarting}, nil
 	}
 
+	desired, err := r.buildPod(box, pvc, info, rebase)
+	if err != nil {
+		r.setFailed(ctx, box, "PodSpecInvalid", err)
+		return ctrl.Result{}, err
+	}
 	if podHash(pod) != desired.Annotations[AnnotationSpecHash] {
 		box.Status.Phase = devpilotv1alpha1.PhaseStarting
 		box.Status.Message = "Restarting the pod to apply the new spec"
@@ -333,6 +359,16 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 		}
 		box.Status.Phase = devpilotv1alpha1.PhaseRunning
 		box.Status.StartingStep = devpilotv1alpha1.StartingStepNone
+		box.Status.ImageCacheState = devpilotv1alpha1.ImageCacheStateCacheHit
+		if pod.Spec.NodeName != "" {
+			box.Status.LastNodeName = pod.Spec.NodeName
+		}
+		box.Status.PrepulledNode = ""
+		if box.Status.PrepullPodName != "" {
+			if err := r.deletePrepullPod(ctx, box); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		box.Status.Message = ""
 		// The endpoint is only meaningful while the pod exists. A published
 		// devbox reports its gateway address instead, which is the one stable
@@ -372,6 +408,9 @@ func (r *DevBoxReconciler) observePod(ctx context.Context, box *devpilotv1alpha1
 	step, message := pendingStep(pod)
 	box.Status.Phase = devpilotv1alpha1.PhaseStarting
 	box.Status.StartingStep = step
+	if summary, err := r.inspectImageCache(ctx, box, info, pod.Spec.NodeName); err == nil {
+		box.Status.ImageCacheState = classifyImageCacheState(box, pod, summary)
+	}
 	box.Status.Message = message
 	return ctrl.Result{RequeueAfter: requeueWhileStarting}, nil
 }

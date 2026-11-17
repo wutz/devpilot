@@ -301,6 +301,8 @@ func (r *DevBoxReconciler) markInterrupted(box *devpilotv1alpha1.DevBox, reason,
 	// is already in the ledger.
 	box.Status.NodeName = ""
 	box.Status.PodName = ""
+	box.Status.PrepulledNode = ""
+	box.Status.ImageCacheState = devpilotv1alpha1.ImageCacheStateNone
 	box.Status.Message = message
 	r.setCondition(box, ConditionReady, metav1ConditionFalse, reason, message)
 	r.setCondition(box, ConditionPreempted, metav1ConditionTrue, reason, message)

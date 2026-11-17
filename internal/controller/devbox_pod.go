@@ -70,6 +70,9 @@ func (r *DevBoxReconciler) applyAction(ctx context.Context, box *devpilotv1alpha
 		if err := r.deletePod(ctx, box.Status.PodName, box.Namespace); err != nil {
 			return false, err
 		}
+		if err := r.deletePrepullPod(ctx, box); err != nil {
+			return false, err
+		}
 		if err := r.deleteRootDisk(ctx, box); err != nil {
 			return false, err
 		}
@@ -93,6 +96,11 @@ func (r *DevBoxReconciler) applyAction(ctx context.Context, box *devpilotv1alpha
 		box.Status.ActiveImage = ""
 		box.Status.ActiveImageDigest = ""
 		box.Status.RootDiskPVC = ""
+		box.Status.LastNodeName = ""
+		box.Status.PrepulledNode = ""
+		box.Status.PrepullPodName = ""
+		box.Status.ImageCacheState = devpilotv1alpha1.ImageCacheStateNone
+		box.Status.ImageSizeBytes = 0
 		box.Status.Phase = devpilotv1alpha1.PhasePending
 		box.Status.Message = "Root disk deleted; it is recreated on the next start"
 	}
@@ -285,6 +293,7 @@ func (r *DevBoxReconciler) buildPod(box *devpilotv1alpha1.DevBox, pvc *corev1.Pe
 			Volumes:        volumes(box, pvc, shm),
 			NodeSelector:   nodeSelectors(box),
 			Tolerations:    box.Spec.Tolerations,
+			Affinity:       nodeAffinityForBox(box),
 		},
 	}
 	if box.Spec.Resources.GPUs > 0 {

@@ -171,7 +171,8 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 		return nil, fmt.Errorf("apply config: %w", err)
 	}
 	image, err = mutate.Append(image, mutate.Addendum{
-		Layer: layer,
+		Layer:       layer,
+		Annotations: layer.Annotations(),
 		History: v1.History{
 			Author:    req.Changes.Author,
 			Comment:   req.Changes.Comment,

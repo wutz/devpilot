@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -53,6 +54,8 @@ type DevBoxCommitReconciler struct {
 	// Flusher pushes a running DevBox's page cache to its root disk before an
 	// online snapshot. Nil means no flush; production wires the exec one.
 	Flusher RootDiskFlusher
+	// Recorder publishes warning Events such as large model cache detection.
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxcommits,verbs=get;list;watch;create;update;patch;delete
@@ -60,6 +63,7 @@ type DevBoxCommitReconciler struct {
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxcommits/finalizers,verbs=update
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=imageprewarms,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create
@@ -67,6 +71,7 @@ type DevBoxCommitReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 const (
 	// CommitFinalizer guards the build Job and any temporary snapshot until
@@ -90,22 +95,28 @@ const (
 	CommitJobLabel = "devpilot.wutz.dev/commit"
 
 	requeueWhileCommitting = 5 * time.Second
+	modelCacheWarningBytes = int64(5) << 30
 )
 
 // CommitConditionReady summarises whether the image was published.
 const CommitConditionReady = "Ready"
 
+type buildStats struct {
+	ModelCacheBytes int64 `json:"modelCacheBytes"`
+}
+
 // buildResult is the JSON summary devpilot-commit writes to the termination log.
 // Every field is optional here so a failure payload, which carries only error,
 // decodes into the same struct.
 type buildResult struct {
-	BaseDigest     string   `json:"baseDigest"`
-	ManifestDigest string   `json:"manifestDigest"`
-	ConfigDigest   string   `json:"configDigest"`
-	DiffID         string   `json:"diffID"`
-	LayerSize      int64    `json:"layerSize"`
-	Images         []string `json:"images"`
-	Error          string   `json:"error"`
+	BaseDigest     string     `json:"baseDigest"`
+	ManifestDigest string     `json:"manifestDigest"`
+	ConfigDigest   string     `json:"configDigest"`
+	DiffID         string     `json:"diffID"`
+	LayerSize      int64      `json:"layerSize"`
+	Images         []string   `json:"images"`
+	Stats          buildStats `json:"stats"`
+	Error          string     `json:"error"`
 }
 
 // Reconcile drives one DevBoxCommit to a terminal phase.
@@ -513,16 +524,85 @@ func (r *DevBoxCommitReconciler) finishBuild(
 	commit.Status.Images = result.Images
 	commit.Status.LayerDiffID = result.DiffID
 	commit.Status.LayerSize = result.LayerSize
+	commit.Status.ModelCacheBytes = result.Stats.ModelCacheBytes
 	commit.Status.BaseImageDigest = result.BaseDigest
 	commit.Status.CompletionTime = &now
 	commit.Status.Message = fmt.Sprintf("Pushed %s", result.Images[0])
+	if result.Stats.ModelCacheBytes >= modelCacheWarningBytes {
+		warnMsg := fmt.Sprintf(
+			"detected %.1f GiB of ML model caches under ~/.cache; move HF_HOME or model weights to a shared PVC to keep images lean",
+			float64(result.Stats.ModelCacheBytes)/float64(1<<30),
+		)
+		commit.Status.Message += "; warning: " + warnMsg
+		if r.Recorder != nil {
+			r.Recorder.Eventf(commit, nil, corev1.EventTypeWarning, "LargeModelCache", "LargeModelCache", warnMsg)
+		}
+	}
 	if commit.Spec.RebaseDevBox {
 		commit.Status.Message += r.scheduleRebase(ctx, commit, result.Images[0])
 	}
+	if shouldPrewarmCommitNode(commit) {
+		commit.Status.Message += r.ensurePostCommitPrewarm(ctx, commit, result.Images[0])
+	}
 	r.setCommitCondition(commit, metav1.ConditionTrue, "Pushed", commit.Status.Message)
 	logf.FromContext(ctx).Info("Commit succeeded",
-		"commit", commit.Name, "digest", result.ManifestDigest, "images", result.Images)
+		"commit", commit.Name, "digest", result.ManifestDigest, "images", result.Images,
+		"modelCacheBytes", result.Stats.ModelCacheBytes)
 	return nil
+}
+
+func shouldPrewarmCommitNode(commit *devpilotv1alpha1.DevBoxCommit) bool {
+	if commit.Spec.PrewarmNode != nil {
+		return *commit.Spec.PrewarmNode
+	}
+	return commit.Spec.RebaseDevBox
+}
+
+func (r *DevBoxCommitReconciler) ensurePostCommitPrewarm(
+	ctx context.Context, commit *devpilotv1alpha1.DevBoxCommit, image string,
+) string {
+	log := logf.FromContext(ctx)
+
+	box := &devpilotv1alpha1.DevBox{}
+	key := types.NamespacedName{Namespace: commit.Namespace, Name: commit.Spec.DevBoxName}
+	if err := r.Get(ctx, key, box); err != nil {
+		log.Error(err, "Could not read the DevBox to schedule post-commit prewarm", "devbox", commit.Spec.DevBoxName)
+		return ""
+	}
+	targetNode := box.Status.LastNodeName
+	if targetNode == "" {
+		targetNode = box.Status.NodeName
+	}
+	if targetNode == "" {
+		return ""
+	}
+
+	ipw := &devpilotv1alpha1.ImagePrewarm{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: prewarmPodName("commit-"+commit.Namespace, commit.Name),
+			Labels: map[string]string{
+				LabelManagedBy:  ValueManagedBy,
+				LabelDevBoxName: box.Name,
+				CommitJobLabel:  commit.Name,
+			},
+		},
+		Spec: devpilotv1alpha1.ImagePrewarmSpec{
+			Image:                 image,
+			NodeSelector:          map[string]string{corev1.LabelHostname: targetNode},
+			Tolerations:           box.Spec.Tolerations,
+			MaxConcurrency:        1,
+			TTLHoursAfterComplete: 1,
+		},
+	}
+	if err := r.Create(ctx, ipw); err != nil {
+		if isAlreadyExists(err) {
+			return ""
+		}
+		log.Error(err, "Could not create post-commit ImagePrewarm", "imageprewarm", ipw.Name, "node", targetNode)
+		return "; could not schedule node prewarm on " + targetNode
+	}
+	log.Info("Scheduled post-commit ImagePrewarm", "imageprewarm", ipw.Name, "node", targetNode, "image", image)
+	return fmt.Sprintf("; prewarming %s on node %s", box.Name, targetNode)
 }
 
 // scheduleRebase points the DevBox at the image this commit published, so its
@@ -724,6 +804,9 @@ func (r *DevBoxCommitReconciler) patchCommitFinalizer(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DevBoxCommitReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorder("devboxcommit")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&devpilotv1alpha1.DevBoxCommit{}).
 		Owns(&batchv1.Job{}).

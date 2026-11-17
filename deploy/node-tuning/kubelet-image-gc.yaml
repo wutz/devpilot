@@ -1,0 +1,9 @@
+# Reference KubeletConfiguration snippet to prevent ImageGC cache thrashing
+# on GPU nodes hosting multiple 30-100 GB AI base images.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+imageGCHighThresholdPercent: 85
+imageGCLowThresholdPercent: 70
+imageMinimumGCAge: 24h0m0s
+serializeImagePulls: false
+maxParallelImagePulls: 5

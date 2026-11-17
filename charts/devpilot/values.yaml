@@ -40,6 +40,16 @@ retention:
   # the volume; delete removes the claim together with the DevBox.
   reclaim: trash
 
+prewarm:
+  # Namespace where ImagePrewarm zero-GPU Pods run. Empty defaults to the
+  # operator's DEVPILOT_NAMESPACE (release namespace).
+  namespace: ""
+
+prepull:
+  # Minimum base image manifest size that triggers automatic two-phase
+  # GPU-free pre-pulling before allocating a GPU node. Set to "0" to disable.
+  threshold: "20Gi"
+
 imagePullSecrets: []
 
 nameOverride: ""

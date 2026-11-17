@@ -22,9 +22,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/wutz/devpilot/internal/initroot"
@@ -41,6 +44,12 @@ func main() {
 // Flags must precede "--"; everything after it is the user's command, which is
 // how the operator passes the base image's original entrypoint and args.
 func run(args []string, stderr *os.File) int {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	return runWithContext(ctx, args, stderr)
+}
+
+func runWithContext(ctx context.Context, args []string, stderr *os.File) int {
 	logf := func(msg string, kv ...any) {
 		_, _ = fmt.Fprintf(stderr, "devpilot-init: %s\n", initroot.FormatMessage(msg, kv...))
 	}
@@ -56,6 +65,8 @@ func run(args []string, stderr *os.File) int {
 		gracePeriod time.Duration
 		flush       bool
 		rebase      bool
+		noop        bool
+		hold        bool
 		sshListen   string
 		sshHostKey  string
 		sshAuthKeys string
@@ -79,6 +90,10 @@ func run(args []string, stderr *os.File) int {
 		"Discard upper/ and pin the pod's base image as the new lower layer; set by the operator after a rebase commit.")
 	fs.BoolVar(&flush, "flush", false,
 		"Flush the root filesystem and exit; used by the operator before taking an online commit snapshot.")
+	fs.BoolVar(&noop, "noop", false,
+		"Exit 0 immediately; used by one-shot image pre-pull and pre-warm Pods after the kubelet pulls the image.")
+	fs.BoolVar(&hold, "hold", false,
+		"Sleep until SIGTERM/SIGINT; used by pinned ImagePrewarm sentinel Pods to prevent kubelet image GC.")
 	fs.StringVar(&sshListen, "ssh-listen", "",
 		"Address the built-in SSH server binds, e.g. \":22\"; empty disables it.")
 	fs.StringVar(&sshHostKey, "ssh-host-key", "",
@@ -93,6 +108,18 @@ func run(args []string, stderr *os.File) int {
 		"File holding the JupyterLab login token; the server is skipped when it cannot be read.")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+
+	if noop {
+		logf("Noop complete")
+		return 0
+	}
+
+	if hold {
+		logf("Holding sentinel pod until signal")
+		<-ctx.Done()
+		logf("Released sentinel hold")
+		return 0
 	}
 
 	// An online commit snapshots the root disk while the pod keeps running, so

@@ -50,6 +50,8 @@ const (
 	testCost = "4.20"
 	// testUser is the identity the reviewer reports for every token.
 	testUser = "alice@example.com"
+	// testPyTorchImage is the container image used by dashboard test fixtures.
+	testPyTorchImage = "nvcr.io/nvidia/pytorch:25.08-py3"
 )
 
 // newServer builds a console over a fake client and records the tokens it saw.
@@ -98,7 +100,7 @@ func testDevBox(namespace, name string) *devpilotv1alpha1.DevBox {
 			DisplayName:  "PyTorch 开发机",
 			DesiredState: devpilotv1alpha1.DesiredStateRunning,
 			PricePerHour: "2.80",
-			Image:        "nvcr.io/nvidia/pytorch:25.08-py3",
+			Image:        testPyTorchImage,
 			Resources: devpilotv1alpha1.DevBoxResources{
 				GPUs:     1,
 				GPUModel: "RTX 5090",
@@ -112,7 +114,7 @@ func testDevBox(namespace, name string) *devpilotv1alpha1.DevBox {
 		},
 		Status: devpilotv1alpha1.DevBoxStatus{
 			Phase:              devpilotv1alpha1.PhaseRunning,
-			ActiveImage:        "nvcr.io/nvidia/pytorch:25.08-py3",
+			ActiveImage:        testPyTorchImage,
 			NodeName:           "gn-10-243-145-105",
 			TotalBilledSeconds: 5400,
 			TotalCost:          testCost,
@@ -348,8 +350,46 @@ func TestCommitRejectsAnUnknownCompression(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", recorder.Code)
 	}
-	if body := recorder.Body.String(); !strings.Contains(body, "zstd or gzip") {
+	if body := recorder.Body.String(); !strings.Contains(body, "zstd, zstd:chunked, or gzip") {
 		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestCommitAcceptsZstdChunked(t *testing.T) {
+	server, _ := newServer(t, testDevBox(testNamespace, testBox))
+	recorder := call(server, http.MethodPost, "/api/devboxes/devpilot-verify/gpu-box/commits",
+		`{"repository":"cr.example.com/library/gpu-box","compression":"zstd:chunked"}`, true)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestListPrewarmsReturnsImagePrewarms(t *testing.T) {
+	ipw := &devpilotv1alpha1.ImagePrewarm{
+		ObjectMeta: metav1.ObjectMeta{Name: "official-pytorch"},
+		Spec: devpilotv1alpha1.ImagePrewarmSpec{
+			Image:    testPyTorchImage,
+			PinImage: true,
+		},
+		Status: devpilotv1alpha1.ImagePrewarmStatus{
+			Phase:        devpilotv1alpha1.ImagePrewarmPhaseCompleted,
+			DesiredNodes: 4,
+			WarmedNodes:  4,
+		},
+	}
+	server, _ := newServer(t, ipw)
+	recorder := call(server, http.MethodGet, "/api/prewarms", "", true)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Items []prewarmView `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 || body.Items[0].Name != "official-pytorch" || body.Items[0].WarmedNodes != 4 || !body.Items[0].PinImage {
+		t.Fatalf("prewarms = %+v", body.Items)
 	}
 }
 

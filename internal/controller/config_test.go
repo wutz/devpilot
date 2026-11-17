@@ -21,6 +21,8 @@ import (
 	"testing"
 )
 
+const testInitImage = "ghcr.io/wutz/devpilot-init:v0.1.0"
+
 func TestParseSnapshotClassMapping(t *testing.T) {
 	t.Parallel()
 
@@ -140,7 +142,7 @@ func TestConfigSnapshotClassMappingIsStable(t *testing.T) {
 func TestConfigValidate(t *testing.T) {
 	t.Parallel()
 
-	if err := (Config{InitImage: "ghcr.io/wutz/devpilot-init:v0.1.0"}).Validate(); err != nil {
+	if err := (Config{InitImage: testInitImage}).Validate(); err != nil {
 		t.Fatalf("Validate() with init image returned unexpected error: %v", err)
 	}
 	if err := (Config{InitImage: "  "}).Validate(); err == nil {
@@ -161,7 +163,7 @@ func TestConfigBuildNamespaceSuffix(t *testing.T) {
 		t.Fatalf("BuildNamespaceSuffixMode() = %q, want %q", got, BuildNamespaceSuffixDefault)
 	}
 
-	base := Config{InitImage: "ghcr.io/wutz/devpilot-init:v0.1.0"}
+	base := Config{InitImage: testInitImage}
 	for _, suffix := range []string{BuildNamespaceSuffixDefault, "-ci", "build"} {
 		withSuffix := base
 		withSuffix.BuildNamespaceSuffix = suffix
@@ -175,5 +177,58 @@ func TestConfigBuildNamespaceSuffix(t *testing.T) {
 		if err := withSuffix.Validate(); err == nil {
 			t.Fatalf("Validate() with suffix %q returned nil error, want error", suffix)
 		}
+	}
+}
+
+func TestConfigPrewarmNamespaceOrDefault(t *testing.T) {
+	t.Setenv("DEVPILOT_NAMESPACE", "")
+	if got := (Config{}).PrewarmNamespaceOrDefault(); got != DefaultPrewarmNamespace {
+		t.Fatalf("PrewarmNamespaceOrDefault() = %q, want %q", got, DefaultPrewarmNamespace)
+	}
+
+	t.Setenv("DEVPILOT_NAMESPACE", "operator-ns")
+	if got := (Config{}).PrewarmNamespaceOrDefault(); got != "operator-ns" {
+		t.Fatalf("PrewarmNamespaceOrDefault() = %q, want operator-ns", got)
+	}
+
+	if got := (Config{PrewarmNamespace: "custom-prewarm"}).PrewarmNamespaceOrDefault(); got != "custom-prewarm" {
+		t.Fatalf("PrewarmNamespaceOrDefault() = %q, want custom-prewarm", got)
+	}
+}
+
+func TestParsePrepullThreshold(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{raw: "", want: 0},
+		{raw: "0", want: 0},
+		{raw: "20Gi", want: 20 << 30},
+		{raw: "512Mi", want: 512 << 20},
+		{raw: "-1Gi", wantErr: true},
+		{raw: "not-a-size", wantErr: true},
+	}
+	for _, tc := range tests {
+		got, err := ParsePrepullThreshold(tc.raw)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("ParsePrepullThreshold(%q) = %d, want error", tc.raw, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("ParsePrepullThreshold(%q) error = %v", tc.raw, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ParsePrepullThreshold(%q) = %d, want %d", tc.raw, got, tc.want)
+		}
+	}
+
+	cfg := Config{InitImage: testInitImage, PrepullThresholdBytes: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted negative PrepullThresholdBytes")
 	}
 }

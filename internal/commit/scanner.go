@@ -64,15 +64,20 @@ type Options struct {
 // Stats summarizes what the scan wrote.
 type Stats struct {
 	// Files is the number of regular entries and symlinks written.
-	Files int
+	Files int `json:"files"`
 	// Whiteouts is the number of deleted entries represented.
-	Whiteouts int
+	Whiteouts int `json:"whiteouts"`
 	// OpaqueDirs is the number of directory replacements represented.
-	OpaqueDirs int
+	OpaqueDirs int `json:"opaqueDirs"`
 	// Hardlinks is the number of entries written as links to an earlier path.
-	Hardlinks int
+	Hardlinks int `json:"hardlinks"`
 	// Skipped is the number of paths dropped by an exclude rule.
-	Skipped int
+	Skipped int `json:"skipped"`
+	// UncompressedBytes is the sum of regular file bytes packaged into the layer.
+	UncompressedBytes int64 `json:"uncompressedBytes,omitempty"`
+	// ModelCacheBytes is the sum of regular file bytes detected under common
+	// ML model cache directories (HuggingFace, ModelScope, Torch Hub).
+	ModelCacheBytes int64 `json:"modelCacheBytes,omitempty"`
 }
 
 // WriteLayer streams upper/ as an uncompressed OCI layer into w.
@@ -81,30 +86,35 @@ type Stats struct {
 // the same tar, and every entry is normalized to root ownership like image
 // layers conventionally are.
 func WriteLayer(w io.Writer, opts Options) (Stats, error) {
+	stats, _, err := writeLayer(w, opts)
+	return stats, err
+}
+
+func writeLayer(w io.Writer, opts Options) (Stats, []string, error) {
 	var stats Stats
 	if opts.UpperDir == "" {
-		return stats, errors.New("upper dir is required")
+		return stats, nil, errors.New("upper dir is required")
 	}
 	info, err := osStat(opts.UpperDir)
 	if err != nil {
-		return stats, fmt.Errorf("stat upper dir: %w", err)
+		return stats, nil, fmt.Errorf("stat upper dir: %w", err)
 	}
 	if !info.IsDir() {
-		return stats, fmt.Errorf("upper dir %s is not a directory", opts.UpperDir)
+		return stats, nil, fmt.Errorf("upper dir %s is not a directory", opts.UpperDir)
 	}
 
 	excludes, err := compileExcludes(opts.ExcludePaths, opts.CleanPackageCache)
 	if err != nil {
-		return stats, err
+		return stats, nil, err
 	}
 	opaque, err := normalizeOpaqueDirs(opts.OpaqueDirs)
 	if err != nil {
-		return stats, err
+		return stats, nil, err
 	}
 
 	entries, err := collectEntries(opts.UpperDir, excludes)
 	if err != nil {
-		return stats, err
+		return stats, nil, err
 	}
 	stats.Skipped = len(entries.skipped)
 
@@ -116,15 +126,19 @@ func WriteLayer(w io.Writer, opts Options) (Stats, error) {
 	defer func() { _ = tw.Close() }()
 
 	hardlinks := make(map[uint64]string)
-	for _, entry := range entries.kept {
-		if err := writeEntry(tw, entry, opaque, hardlinks, &stats); err != nil {
-			return stats, err
+	var keptFiles []string
+	for _, e := range entries.kept {
+		if err := writeEntry(tw, e, opaque, hardlinks, &stats); err != nil {
+			return stats, nil, err
+		}
+		if e.info.Mode().IsRegular() {
+			keptFiles = append(keptFiles, e.rel)
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return stats, fmt.Errorf("close tar stream: %w", err)
+		return stats, nil, fmt.Errorf("close tar stream: %w", err)
 	}
-	return stats, nil
+	return stats, keptFiles, nil
 }
 
 // entry is one path discovered in upper/, in walk (lexical) order.
@@ -310,7 +324,69 @@ func writeRegular(tw *tar.Writer, e entry, hardlinks map[uint64]string, stats *S
 		return fmt.Errorf("write content of %s: %w", e.rel, err)
 	}
 	stats.Files++
+	stats.UncompressedBytes += e.info.Size()
+	if isModelCachePath(e.rel) {
+		stats.ModelCacheBytes += e.info.Size()
+	}
 	return nil
+}
+
+// isModelCachePath reports whether rel sits inside a common ML model weight
+// cache directory that is normally better kept on a shared PVC or filesystem.
+func isModelCachePath(rel string) bool {
+	if cacheRel, ok := strings.CutPrefix(rel, "root/.cache/"); ok {
+		return isModelCacheSuffix(cacheRel)
+	}
+	if rest, ok := strings.CutPrefix(rel, "home/"); ok {
+		if _, afterUser, found := strings.Cut(rest, "/"); found {
+			if cacheRel, ok := strings.CutPrefix(afterUser, ".cache/"); ok {
+				return isModelCacheSuffix(cacheRel)
+			}
+		}
+	}
+	return false
+}
+
+func isModelCacheSuffix(cacheRel string) bool {
+	return strings.HasPrefix(cacheRel, "huggingface/") ||
+		strings.HasPrefix(cacheRel, "modelscope/") ||
+		strings.HasPrefix(cacheRel, "torch/hub/")
+}
+
+// prioritizedLandmarkFiles picks regular files in the layer that are read
+// during container startup (sshd, python/conda binaries, torch imports, CUDA
+// shared libraries) so zstd:chunked places them before the prefetch landmark.
+func prioritizedLandmarkFiles(paths []string) []string {
+	var prioritized []string
+	for _, p := range paths {
+		if isLandmarkFile(p) {
+			prioritized = append(prioritized, p)
+		}
+	}
+	return prioritized
+}
+
+func isLandmarkFile(rel string) bool {
+	switch {
+	case strings.HasPrefix(rel, "etc/"),
+		strings.HasPrefix(rel, "usr/bin/"),
+		rel == "usr/sbin/sshd",
+		strings.HasPrefix(rel, "opt/conda/bin/"):
+		return true
+	case (strings.HasPrefix(rel, "opt/conda/lib/python") ||
+		strings.HasPrefix(rel, "usr/local/lib/python") ||
+		strings.HasPrefix(rel, "usr/lib/python")) &&
+		(strings.Contains(rel, "/site-packages/torch/") ||
+			strings.Contains(rel, "/dist-packages/torch/")):
+		return true
+	case strings.Contains(rel, "libcudart") ||
+		strings.Contains(rel, "libcublas") ||
+		strings.Contains(rel, "libcudnn") ||
+		strings.Contains(rel, "libnccl"):
+		return true
+	default:
+		return false
+	}
 }
 
 // isZeroDevice reports whether a character device is OverlayFS's deletion

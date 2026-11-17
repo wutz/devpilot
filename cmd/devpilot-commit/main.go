@@ -106,7 +106,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	fs.StringVar(&tags, "tags", "",
 		"Comma separated tags to push.")
 	fs.StringVar(&compression, "compression", commit.CompressionZstd,
-		"Layer compression: zstd or gzip. A docker base image accepts gzip only.")
+		"Layer compression: zstd, zstd:chunked, or gzip. A docker base image accepts gzip only.")
 	fs.StringVar(&excludes, "exclude", "",
 		"Comma separated extra globs to skip, relative to the layer root.")
 	fs.BoolVar(&cleanCache, "clean-package-cache", true,

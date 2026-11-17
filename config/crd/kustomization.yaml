@@ -4,6 +4,7 @@
 resources:
 - bases/devpilot.wutz.dev_devboxes.yaml
 - bases/devpilot.wutz.dev_devboxcommits.yaml
+- bases/devpilot.wutz.dev_imageprewarms.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

@@ -57,8 +57,9 @@ func (f *fakeResolver) Resolve(_ context.Context, image string) (ImageInfo, erro
 }
 
 const (
-	testDigest = "sha256:0b2f5d3a8db1c8e1a3e25e3a2f4c3b2a1f0e9d8c7b6a5948372615041320ffee"
-	testInit   = "registry.example.com/devpilot-init:test"
+	testDigest       = "sha256:0b2f5d3a8db1c8e1a3e25e3a2f4c3b2a1f0e9d8c7b6a5948372615041320ffee"
+	testInit         = "registry.example.com/devpilot-init:test"
+	testGPUModelA100 = "a100"
 )
 
 func newTestResolver() *fakeResolver {
@@ -78,7 +79,7 @@ func newTestDevBox(name, namespace string) *devpilotv1alpha1.DevBox {
 			Image: testDevBoxImage,
 			Resources: devpilotv1alpha1.DevBoxResources{
 				GPUs:     1,
-				GPUModel: "a100",
+				GPUModel: testGPUModelA100,
 			},
 			RootDisk: devpilotv1alpha1.RootDiskSpec{
 				Size:             resource.MustParse(testVolumeSize),
@@ -201,7 +202,7 @@ var _ = Describe("DevBox Controller", func() {
 		Expect(main.Command).To(ContainElement("--image-digest=" + testDigest))
 		Expect(main.Command[len(main.Command)-1]).To(Equal("torch.distributed.run"))
 		Expect(*pod.Spec.RuntimeClassName).To(Equal("nvidia"))
-		Expect(pod.Spec.NodeSelector).To(HaveKeyWithValue(DefaultGPUNodeLabel, "a100"))
+		Expect(pod.Spec.NodeSelector).To(HaveKeyWithValue(DefaultGPUNodeLabel, testGPUModelA100))
 
 		By("recording the pinned digest")
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())

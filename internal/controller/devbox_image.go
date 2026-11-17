@@ -38,6 +38,9 @@ type ImageInfo struct {
 	ImageRef string
 	// Digest is the platform specific manifest digest.
 	Digest string
+	// TotalSizeBytes is the sum of compressed layer sizes plus config blob size
+	// reported by the image manifest. Zero means unknown.
+	TotalSizeBytes int64
 	// Entrypoint and Cmd reproduce the image's own start command.
 	Entrypoint []string
 	Cmd        []string
@@ -70,14 +73,24 @@ func (RegistryResolver) Resolve(ctx context.Context, image string) (ImageInfo, e
 	if err != nil {
 		return ImageInfo{}, fmt.Errorf("digest of %q: %w", image, err)
 	}
+	manifest, err := img.Manifest()
+	if err != nil {
+		return ImageInfo{}, fmt.Errorf("manifest of %q: %w", image, err)
+	}
+	var totalSize int64
+	for _, layer := range manifest.Layers {
+		totalSize += layer.Size
+	}
+	totalSize += manifest.Config.Size
 	config, err := img.ConfigFile()
 	if err != nil {
 		return ImageInfo{}, fmt.Errorf("config of %q: %w", image, err)
 	}
 	return ImageInfo{
-		ImageRef:   image,
-		Digest:     digest.String(),
-		Entrypoint: append([]string{}, config.Config.Entrypoint...),
-		Cmd:        append([]string{}, config.Config.Cmd...),
+		ImageRef:       image,
+		Digest:         digest.String(),
+		TotalSizeBytes: totalSize,
+		Entrypoint:     append([]string{}, config.Config.Entrypoint...),
+		Cmd:            append([]string{}, config.Config.Cmd...),
 	}, nil
 }

@@ -31,4 +31,12 @@ resources:
   kind: DevBoxCommit
   path: github.com/wutz/devpilot/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+  controller: true
+  domain: wutz.dev
+  group: devpilot
+  kind: ImagePrewarm
+  path: github.com/wutz/devpilot/api/v1alpha1
+  version: v1alpha1
 version: "3"

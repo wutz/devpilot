@@ -76,6 +76,7 @@ helm upgrade --install devpilot oci://ghcr.io/wutz/charts/devpilot \
 
 - [架构总览与方案选型](docs/architecture.md) — 方案对比、整体拓扑、关键设计决策（D1–D12）与核心工作流
 - [持久化与镜像提交机制深潜](docs/persistence-and-commit.md) — `devpilot-init` 切根细节、NVIDIA 子挂载迁移、Whiteout 转 OCI 层、CSI 热快照与 Rebase
+- [超大基础镜像加速与预热规划](docs/image-acceleration-and-prewarm.md) — 30–100 GB 镜像冷启动瓶颈拆解、节点缓存亲和、`ImagePrewarm`、Spegel P2P 与 `zstd:chunked`/Nydus 懒加载分阶段设计
 - [Operator 与 CRD 规范](docs/operator-and-crd.md) — `DevBox` 与 `DevBoxCommit` 完整字段定义、状态机、计费段与生命周期 GC
 - [接入体系与安全边界](docs/access-and-security.md) — SSH 直连、Jupyter/Web 路由（端口 `7443`）、最小权限 `SecurityContext` 与凭证隔离
 - [演进路线图](docs/roadmap.md) — M0–M4 阶段划分与集群端到端验收标准

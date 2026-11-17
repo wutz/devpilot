@@ -92,6 +92,7 @@ func New(scheme *runtime.Scheme, base *rest.Config, log logr.Logger) *Server {
 	mux.HandleFunc("GET /api/devboxes/{namespace}/{name}", s.handleGet)
 	mux.HandleFunc("POST /api/devboxes/{namespace}/{name}/state", s.handleState)
 	mux.HandleFunc("POST /api/devboxes/{namespace}/{name}/commits", s.handleCommit)
+	mux.HandleFunc("GET /api/prewarms", s.handleListPrewarms)
 
 	assets, err := fs.Sub(assetTree, "assets")
 	if err != nil {
@@ -373,6 +374,36 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleListPrewarms lists cluster-scoped ImagePrewarm objects as the caller.
+func (s *Server) handleListPrewarms(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	list := &devpilotv1alpha1.ImagePrewarmList{}
+	if err := c.List(r.Context(), list); err != nil {
+		s.fail(w, err, "Could not list image prewarms")
+		return
+	}
+	views := make([]prewarmView, 0, len(list.Items))
+	for i := range list.Items {
+		ipw := &list.Items[i]
+		views = append(views, prewarmView{
+			Name:            ipw.Name,
+			Image:           ipw.Spec.Image,
+			ResolvedDigest:  ipw.Status.ResolvedDigest,
+			Phase:           string(ipw.Status.Phase),
+			DesiredNodes:    ipw.Status.DesiredNodes,
+			WarmedNodes:     ipw.Status.WarmedNodes,
+			InProgressNodes: ipw.Status.InProgressNodes,
+			FailedNodes:     ipw.Status.FailedNodes,
+			PinImage:        ipw.Spec.PinImage,
+			Message:         ipw.Status.Message,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": views})
+}
+
 // validateCommitChoices rejects values the CRD would refuse, so the console can
 // explain them instead of surfacing a raw validation error.
 func validateCommitChoices(body commitRequest) error {
@@ -383,9 +414,9 @@ func validateCommitChoices(body commitRequest) error {
 		return fmt.Errorf("consistency must be one of Sync, Freeze or OfflineOnly, got %q", body.Consistency)
 	}
 	switch devpilotv1alpha1.CommitCompression(body.Compression) {
-	case "", devpilotv1alpha1.CompressionZstd, devpilotv1alpha1.CompressionGzip:
+	case "", devpilotv1alpha1.CompressionZstd, devpilotv1alpha1.CompressionZstdChunked, devpilotv1alpha1.CompressionGzip:
 	default:
-		return fmt.Errorf("compression must be zstd or gzip, got %q", body.Compression)
+		return fmt.Errorf("compression must be zstd, zstd:chunked, or gzip, got %q", body.Compression)
 	}
 	return nil
 }
@@ -451,28 +482,32 @@ func bearerToken(r *http.Request) (string, bool) {
 // newDevBoxView flattens a devbox into the shape the console renders.
 func newDevBoxView(box *devpilotv1alpha1.DevBox) devBoxView {
 	view := devBoxView{
-		Namespace:     box.Namespace,
-		Name:          box.Name,
-		DisplayName:   box.Spec.DisplayName,
-		Phase:         string(box.Status.Phase),
-		DesiredState:  string(box.Spec.DesiredState),
-		Message:       box.Status.Message,
-		Image:         box.Spec.Image,
-		ActiveImage:   box.Status.ActiveImage,
-		GPUs:          box.Spec.Resources.GPUs,
-		GPUModel:      box.Spec.Resources.GPUModel,
-		CPU:           box.Spec.Resources.CPU.String(),
-		Memory:        box.Spec.Resources.Memory.String(),
-		RootDiskSize:  box.Spec.RootDisk.Size.String(),
-		NodeName:      box.Status.NodeName,
-		PricePerHour:  box.Spec.PricePerHour,
-		BilledSeconds: box.Status.TotalBilledSeconds,
-		TotalCost:     box.Status.TotalCost,
-		Endpoints:     endpointsView(box.Status.Endpoints),
-		StoppedAt:     rfc3339(box.Status.StoppedAt),
-		ReleaseAt:     rfc3339(box.Status.ScheduledReleaseTime),
-		Conditions:    conditionsView(box.Status.Conditions),
-		Segments:      segmentsView(box.Status.Segments),
+		Namespace:       box.Namespace,
+		Name:            box.Name,
+		DisplayName:     box.Spec.DisplayName,
+		Phase:           string(box.Status.Phase),
+		StartingStep:    string(box.Status.StartingStep),
+		DesiredState:    string(box.Spec.DesiredState),
+		Message:         box.Status.Message,
+		Image:           box.Spec.Image,
+		ActiveImage:     box.Status.ActiveImage,
+		ImageSizeBytes:  box.Status.ImageSizeBytes,
+		ImageCacheState: string(box.Status.ImageCacheState),
+		GPUs:            box.Spec.Resources.GPUs,
+		GPUModel:        box.Spec.Resources.GPUModel,
+		CPU:             box.Spec.Resources.CPU.String(),
+		Memory:          box.Spec.Resources.Memory.String(),
+		RootDiskSize:    box.Spec.RootDisk.Size.String(),
+		NodeName:        box.Status.NodeName,
+		LastNodeName:    box.Status.LastNodeName,
+		PricePerHour:    box.Spec.PricePerHour,
+		BilledSeconds:   box.Status.TotalBilledSeconds,
+		TotalCost:       box.Status.TotalCost,
+		Endpoints:       endpointsView(box.Status.Endpoints),
+		StoppedAt:       rfc3339(box.Status.StoppedAt),
+		ReleaseAt:       rfc3339(box.Status.ScheduledReleaseTime),
+		Conditions:      conditionsView(box.Status.Conditions),
+		Segments:        segmentsView(box.Status.Segments),
 	}
 	return view
 }

@@ -23,29 +23,47 @@ package dashboard
 // that is one kubectl away, and keeping the view narrow keeps the API honest
 // about what the console understands.
 type devBoxView struct {
-	Namespace     string `json:"namespace"`
-	Name          string `json:"name"`
-	DisplayName   string `json:"displayName,omitempty"`
-	Phase         string `json:"phase"`
-	DesiredState  string `json:"desiredState"`
-	Message       string `json:"message,omitempty"`
-	Image         string `json:"image"`
-	ActiveImage   string `json:"activeImage,omitempty"`
-	GPUs          int32  `json:"gpus"`
-	GPUModel      string `json:"gpuModel,omitempty"`
-	CPU           string `json:"cpu,omitempty"`
-	Memory        string `json:"memory,omitempty"`
-	RootDiskSize  string `json:"rootDiskSize,omitempty"`
-	NodeName      string `json:"nodeName,omitempty"`
-	PricePerHour  string `json:"pricePerHour,omitempty"`
-	BilledSeconds int64  `json:"billedSeconds"`
-	TotalCost     string `json:"totalCost,omitempty"`
+	Namespace       string `json:"namespace"`
+	Name            string `json:"name"`
+	DisplayName     string `json:"displayName,omitempty"`
+	Phase           string `json:"phase"`
+	StartingStep    string `json:"startingStep,omitempty"`
+	DesiredState    string `json:"desiredState"`
+	Message         string `json:"message,omitempty"`
+	Image           string `json:"image"`
+	ActiveImage     string `json:"activeImage,omitempty"`
+	ImageSizeBytes  int64  `json:"imageSizeBytes,omitempty"`
+	ImageCacheState string `json:"imageCacheState,omitempty"`
+	GPUs            int32  `json:"gpus"`
+	GPUModel        string `json:"gpuModel,omitempty"`
+	CPU             string `json:"cpu,omitempty"`
+	Memory          string `json:"memory,omitempty"`
+	RootDiskSize    string `json:"rootDiskSize,omitempty"`
+	NodeName        string `json:"nodeName,omitempty"`
+	LastNodeName    string `json:"lastNodeName,omitempty"`
+	PricePerHour    string `json:"pricePerHour,omitempty"`
+	BilledSeconds   int64  `json:"billedSeconds"`
+	TotalCost       string `json:"totalCost,omitempty"`
 	// Endpoints maps "ssh", "jupyter" and "port/<name>" to their URLs.
 	Endpoints  map[string]string `json:"endpoints,omitempty"`
 	StoppedAt  string            `json:"stoppedAt,omitempty"`
 	ReleaseAt  string            `json:"releaseAt,omitempty"`
 	Conditions []conditionView   `json:"conditions,omitempty"`
 	Segments   []segmentView     `json:"segments,omitempty"`
+}
+
+// prewarmView is the JSON shape the console renders for one ImagePrewarm.
+type prewarmView struct {
+	Name            string `json:"name"`
+	Image           string `json:"image"`
+	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
+	Phase           string `json:"phase"`
+	DesiredNodes    int32  `json:"desiredNodes"`
+	WarmedNodes     int32  `json:"warmedNodes"`
+	InProgressNodes int32  `json:"inProgressNodes"`
+	FailedNodes     int32  `json:"failedNodes"`
+	PinImage        bool   `json:"pinImage,omitempty"`
+	Message         string `json:"message,omitempty"`
 }
 
 // conditionView is one status condition.

@@ -1,0 +1,28 @@
+# Reference containerd 2.x configuration snippet for DevPilot GPU nodes.
+# Merge these settings into /etc/containerd/config.toml and restart containerd.
+
+version = 3
+
+[plugins."io.containerd.cri.v1.images"]
+  # Required for Spegel P2P distribution: keep compressed blobs on NVMe after
+  # unpacking so other GPU nodes can pull layers over the cluster network.
+  discard_unpacked_layers = false
+
+  # Raise from default 3 so 70+ layer CUDA/PyTorch images saturate NVMe + 25G/100G NICs.
+  max_concurrent_downloads = 10
+
+  # Optional (P2): switch to "stargz" once stargz-snapshotter is running on the node
+  # to enable lazy pulling for zstd:chunked images. Standard zstd/gzip images still work.
+  # snapshotter = "stargz"
+
+  [plugins."io.containerd.cri.v1.images".pinned_images]
+    sandbox = "registry.k8s.io/pause:3.10"
+
+[plugins."io.containerd.cri.v1.images".registry]
+  config_path = "/etc/containerd/certs.d"
+
+# Optional (P2): remote stargz snapshotter proxy for zstd:chunked lazy pulling.
+# [proxy_plugins]
+#   [proxy_plugins.stargz]
+#     type = "snapshot"
+#     address = "/run/containerd-stargz-grpc/containerd-stargz-grpc.sock"

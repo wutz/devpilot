@@ -2,4 +2,5 @@
 resources:
 - devpilot_v1alpha1_devbox.yaml
 - devpilot_v1alpha1_devboxcommit.yaml
+- devpilot_v1alpha1_imageprewarm.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

@@ -242,6 +242,10 @@
     color: var(--ink);
   }
   .dialog-copy { color: var(--mute); font-size: 12px; margin: 0 0 12px; }
+  .pill.cache-hit { color: #0a7b5f; border-color: #cdeee4; background: #f2fbf8; }
+  .pill.cache-p2p { color: var(--link); border-color: #cfe5ff; background: #f2f8ff; }
+  .pill.cache-cold { color: var(--warning-deep); border-color: var(--warning); background: #fff8ec; }
+  .prewarm-section[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -259,6 +263,10 @@
   <div id="identity" class="identity" hidden></div>
   <div id="status-line" class="eyebrow" style="margin-bottom:16px"></div>
   <div id="content" class="grid" aria-live="polite"></div>
+  <section id="prewarm-section" class="prewarm-section" hidden>
+    <div class="eyebrow" style="margin:28px 0 12px">镜像预热任务（ImagePrewarm）</div>
+    <div id="prewarm-list" class="grid"></div>
+  </section>
 </main>
 
 <dialog id="commit-dialog">
@@ -288,12 +296,14 @@
       <label for="commit-compression">压缩</label>
       <select id="commit-compression">
         <option value="zstd">zstd — 更快，层更小</option>
+        <option value="zstd:chunked">zstd:chunked — 按需懒加载与后台预取（需节点 Snapshotter）</option>
         <option value="gzip">gzip — 基础镜像为 docker manifest 时必须</option>
       </select>
     </div>
     <div class="field">
       <label><input id="commit-rebase" type="checkbox"> 保存后将实例切到新镜像并清空上层（仅在离线提交时可用）</label>
     </div>
+    <p class="dialog-copy">提示：请勿将大模型权重（如 ~/.cache/huggingface，&ge; 5 GiB）打入镜像；建议通过 HF_HOME 挂载共享数据盘 PVC，避免拉取耗时过长。</p>
     <div class="dialog-actions">
       <button type="button" id="commit-cancel">取消</button>
       <button type="submit" class="primary" id="commit-submit">开始提交</button>
@@ -342,13 +352,15 @@
   "use strict";
   // The view on screen reflects the last refresh, not whatever is typed since.
   const state = {
-    hasToken: false, items: [], busy: new Set(), commitTarget: null, tokenCommand: null,
+    hasToken: false, items: [], prewarms: [], busy: new Set(), commitTarget: null, tokenCommand: null,
     who: null, perm: null, claims: null, scope: "", error: null
   };
   // expiredShown records whether the cards on screen were drawn with a lapsed token.
   let expiredShown = false;
 
   const content = document.getElementById("content");
+  const prewarmSection = document.getElementById("prewarm-section");
+  const prewarmList = document.getElementById("prewarm-list");
   const identity = document.getElementById("identity");
   const statusLine = document.getElementById("status-line");
   const namespaceInput = document.getElementById("namespace");
@@ -395,9 +407,9 @@
 
   function phaseClass(phase) {
     switch (phase) {
-      case "Running": return "running";
-      case "Starting": case "Stopping": case "Pending": return "starting";
-      case "Failed": return "failed";
+      case "Running": case "Completed": return "running";
+      case "Starting": case "Stopping": case "Pending": case "Warming": return "starting";
+      case "Failed": case "Degraded": return "failed";
       case "Interrupted": return "interrupted";
       default: return "stopped";
     }
@@ -409,6 +421,43 @@
     const minutes = Math.floor((total % 3600) / 60);
     if (hours > 0) return hours + " 小时 " + minutes + " 分";
     return minutes + " 分钟";
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return "";
+    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let value = bytes;
+    let idx = 0;
+    while (value >= 1024 && idx < units.length - 1) {
+      value /= 1024;
+      idx++;
+    }
+    return (idx === 0 ? String(value) : value.toFixed(1)) + " " + units[idx];
+  }
+
+  function formatStartingStep(step) {
+    switch (step) {
+      case "AllocatingResources": return "分配资源中";
+      case "PrepullingImage": return "无卡两阶段预拉取中（未占 GPU）";
+      case "PullingImage": return "拉取镜像中";
+      case "MountingRootDisk": return "挂载持久根盘";
+      default: return step || "";
+    }
+  }
+
+  function cacheBadge(stateName) {
+    switch (stateName) {
+      case "CacheHit":
+        return el("span", "pill cache-hit", "缓存命中 · 预计 <5s");
+      case "P2PPulling":
+        return el("span", "pill cache-p2p", "P2P 内网加速中");
+      case "Prepulling":
+        return el("span", "pill cache-p2p", "无卡预拉取中（未占 GPU）");
+      case "ColdPulling":
+        return el("span", "pill cache-cold", "首次冷拉取外部镜像");
+      default:
+        return null;
+    }
   }
 
   function formatTime(value) {
@@ -512,10 +561,49 @@
     return guide;
   }
 
+  function renderPrewarms() {
+    prewarmList.textContent = "";
+    if (!state.hasToken || tokenExpired() || !state.prewarms.length) {
+      prewarmSection.hidden = true;
+      return;
+    }
+    prewarmSection.hidden = false;
+    for (const pw of state.prewarms) {
+      const card = el("article", "card");
+      const head = el("div", "card-head");
+      const titles = el("div");
+      titles.append(el("div", "card-title", pw.name));
+      titles.append(el("div", "card-sub", "集群级镜像预热"));
+      head.append(titles, el("span", "spacer"));
+      const pill = el("span", "pill " + phaseClass(pw.phase));
+      pill.append(el("span", "dot"), el("span", "", pw.phase || "Pending"));
+      head.append(pill);
+      card.append(head);
+
+      if (pw.message) {
+        card.append(el("div", "card-sub", pw.message));
+      }
+
+      const meta = el("dl", "meta");
+      metaRow(meta, "镜像", pw.image, true);
+      metaRow(meta, "Digest", pw.resolvedDigest, true);
+      const progressParts = [pw.warmedNodes + " / " + pw.desiredNodes + " 节点就绪"];
+      if (pw.inProgressNodes > 0) progressParts.push(pw.inProgressNodes + " 进行中");
+      if (pw.failedNodes > 0) progressParts.push(pw.failedNodes + " 失败");
+      metaRow(meta, "进度", progressParts.join(" · "));
+      if (pw.pinImage) {
+        metaRow(meta, "钉住缓存", "是（--hold 哨兵）");
+      }
+      card.append(meta);
+      prewarmList.append(card);
+    }
+  }
+
   function render() {
     renderIdentity();
     expiredShown = tokenExpired();
     content.textContent = "";
+    renderPrewarms();
     if (!state.hasToken) {
       content.append(guideCard());
       return;
@@ -564,11 +652,23 @@
       card.append(el("div", "card-sub", box.message));
     }
 
+    const badge = cacheBadge(box.imageCacheState);
+    if (badge && (box.phase === "Starting" || box.phase === "Pending" || box.phase === "Running")) {
+      const cacheRow = el("div", "actions");
+      cacheRow.style.marginTop = "0";
+      cacheRow.append(badge);
+      card.append(cacheRow);
+    }
+
     const meta = el("dl", "meta");
     metaRow(meta, "镜像", box.activeImage || box.image, true);
+    metaRow(meta, "镜像大小", formatBytes(box.imageSizeBytes));
+    if (box.phase === "Starting" || box.phase === "Pending") {
+      metaRow(meta, "启动阶段", formatStartingStep(box.startingStep));
+    }
     metaRow(meta, "算力", [box.gpus > 0 ? box.gpus + " × " + (box.gpuModel || "GPU") : "CPU", box.cpu, box.memory].filter(Boolean).join(" · "));
     metaRow(meta, "根盘", box.rootDiskSize);
-    metaRow(meta, "节点", box.nodeName, true);
+    metaRow(meta, "节点", box.nodeName || (box.lastNodeName ? "上次: " + box.lastNodeName + "（优先亲和）" : ""), true);
     metaRow(meta, "SSH", box.endpoints && box.endpoints.ssh, true);
     metaRow(meta, "Jupyter", box.endpoints && box.endpoints.jupyter);
     if (box.endpoints) {
@@ -695,7 +795,7 @@
   }
 
   // load reads the devboxes together with who the token belongs to and what it
-  // may do in the namespace in view. The two calls are independent: a failed
+  // may do in the namespace in view. The calls are independent: a failed
   // permission check still shows the list, and a failed list still shows who.
   async function load() {
     const token = currentToken();
@@ -704,7 +804,7 @@
     sessionStorage.setItem("devpilot-namespace", namespace);
     if (!token) {
       sessionStorage.removeItem("devpilot-token");
-      Object.assign(state, { hasToken: false, items: [], error: null, who: null, perm: null, claims: null, scope: "" });
+      Object.assign(state, { hasToken: false, items: [], prewarms: [], error: null, who: null, perm: null, claims: null, scope: "" });
       render();
       statusLine.textContent = "填入 Bearer Token 后刷新";
       return;
@@ -713,20 +813,22 @@
     Object.assign(state, { hasToken: true, claims: decodeClaims(token), scope: namespace });
     if (tokenExpired()) {
       // An expired token would only earn a 401, so skip the round trip.
-      Object.assign(state, { items: [], error: null, who: null, perm: null });
+      Object.assign(state, { items: [], prewarms: [], error: null, who: null, perm: null });
       render();
       statusLine.textContent = "Token 已过期，请重新获取";
       return;
     }
     statusLine.textContent = "加载中…";
     const query = namespace ? "?namespace=" + encodeURIComponent(namespace) : "";
-    const [who, boxes] = await Promise.allSettled([
+    const [who, boxes, prewarms] = await Promise.allSettled([
       api("/api/whoami" + query),
-      api("/api/devboxes" + query)
+      api("/api/devboxes" + query),
+      api("/api/prewarms")
     ]);
     state.who = who.status === "fulfilled" ? who.value : null;
     state.perm = state.who ? state.who.permissions : null;
     state.items = boxes.status === "fulfilled" ? boxes.value.items || [] : [];
+    state.prewarms = prewarms.status === "fulfilled" ? prewarms.value.items || [] : [];
     state.error = boxes.status === "fulfilled" ? null : boxes.reason.message;
     render();
     if (state.error) {

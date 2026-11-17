@@ -35,6 +35,10 @@ const (
 	// CompressionZstd is smaller and about an order of magnitude faster to
 	// compress, and is what containerd and Harbor both accept.
 	CompressionZstd = "zstd"
+	// CompressionZstdChunked produces a seekable OCI zstd:chunked layer with an
+	// embedded eStargz TOC so lazy-pulling snapshotters can fetch files on demand
+	// while remaining compatible with standard OCI zstd consumers.
+	CompressionZstdChunked = "zstd:chunked"
 )
 
 // layerMediaType reports the OCI media type for a compressed layer. The layer
@@ -42,7 +46,7 @@ const (
 // Docker schema 2 manifest may only carry docker layer types.
 func layerMediaType(compression string, docker bool) (types.MediaType, error) {
 	switch compression {
-	case CompressionZstd:
+	case CompressionZstd, CompressionZstdChunked:
 		// There is no docker zstd layer type; an OCI layer type inside a docker
 		// manifest is rejected, which the caller reports as a base image that
 		// cannot take a zstd layer.
@@ -85,7 +89,7 @@ func newCompressor(w io.Writer, compression string) (io.WriteCloser, error) {
 // the v1.Layer contract requires.
 func newDecompressor(r io.Reader, compression string) (io.ReadCloser, error) {
 	switch compression {
-	case CompressionZstd:
+	case CompressionZstd, CompressionZstdChunked:
 		dec, err := zstd.NewReader(r)
 		if err != nil {
 			return nil, fmt.Errorf("create zstd decoder: %w", err)

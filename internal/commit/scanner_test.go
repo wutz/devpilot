@@ -32,10 +32,12 @@ import (
 )
 
 const (
-	testMarker    = "root/persistence-marker"
-	testKeepMe    = "keep me\n"
-	testProfileSh = "etc/profile.d/x.sh"
-	testScript    = "print('hi')\n"
+	testMarker      = "root/persistence-marker"
+	testKeepMe      = "keep me\n"
+	testProfileSh   = "etc/profile.d/x.sh"
+	testScript      = "print('hi')\n"
+	testSSHDPath    = "usr/sbin/sshd"
+	testTrainPyPath = "opt/app/train.py"
 )
 
 // layerEntry is one tar member with its body decoded as text.
@@ -98,9 +100,9 @@ func writeTree(t *testing.T, files map[string]string) string {
 
 func TestWriteLayerPackagesFilesAndDirectories(t *testing.T) {
 	upper := writeTree(t, map[string]string{
-		testMarker:         testKeepMe,
-		"opt/app/train.py": testScript,
-		testProfileSh:      "export A=1\n",
+		testMarker:      testKeepMe,
+		testTrainPyPath: testScript,
+		testProfileSh:   "export A=1\n",
 	})
 
 	var buf bytes.Buffer
@@ -112,7 +114,7 @@ func TestWriteLayerPackagesFilesAndDirectories(t *testing.T) {
 	layer := readLayer(t, buf.Bytes())
 	want := []string{
 		"etc/", "etc/profile.d/", testProfileSh,
-		"opt/", "opt/app/", "opt/app/train.py",
+		"opt/", "opt/app/", testTrainPyPath,
 		"root/", testMarker,
 	}
 	if got := names(layer); !reflect.DeepEqual(got, want) {
@@ -124,10 +126,10 @@ func TestWriteLayerPackagesFilesAndDirectories(t *testing.T) {
 			t.Errorf("%s typeflag = %v, want TypeDir", dir, layer[dir].header.Typeflag)
 		}
 	}
-	if got := layer["opt/app/train.py"].content; got != testScript {
+	if got := layer[testTrainPyPath].content; got != testScript {
 		t.Errorf("train.py content = %q", got)
 	}
-	if got := layer["opt/app/train.py"].header.Typeflag; got != tar.TypeReg {
+	if got := layer[testTrainPyPath].header.Typeflag; got != tar.TypeReg {
 		t.Errorf("train.py typeflag = %v, want TypeReg", got)
 	}
 	if stats.Files != 3 || stats.Whiteouts != 0 || stats.OpaqueDirs != 0 || stats.Hardlinks != 0 {
@@ -391,5 +393,25 @@ func TestCompileExcludesMatchesSubtreePatterns(t *testing.T) {
 		if excludesMatched(rules, p) {
 			t.Errorf("%s should not match any exclude rule", p)
 		}
+	}
+}
+
+func TestWriteLayerTracksModelCacheBytes(t *testing.T) {
+	upper := writeTree(t, map[string]string{
+		"root/.cache/huggingface/hub/model.bin": "1234567890",
+		"home/alice/.cache/modelscope/w.bin":    "12345",
+		"home/bob/.cache/torch/hub/chk.pt":      "1234",
+		testTrainPyPath:                         "123",
+	})
+
+	stats, err := WriteLayer(io.Discard, Options{UpperDir: upper})
+	if err != nil {
+		t.Fatalf("WriteLayer: %v", err)
+	}
+	if stats.ModelCacheBytes != 19 {
+		t.Errorf("ModelCacheBytes = %d, want 19", stats.ModelCacheBytes)
+	}
+	if stats.UncompressedBytes != 22 {
+		t.Errorf("UncompressedBytes = %d, want 22", stats.UncompressedBytes)
 	}
 }

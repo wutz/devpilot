@@ -36,8 +36,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 	sshgatewayv1alpha1 "github.com/wutz/sshgateway/api/v1alpha1"
+
+	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 
 	"github.com/wutz/devpilot/internal/controller"
 	"github.com/wutz/devpilot/internal/dashboard"
@@ -83,6 +84,8 @@ func main() {
 	var buildNamespaceSuffix string
 	var dashboardAddr string
 	var dashboardTokenCommand string
+	var prewarmNamespace string
+	var prepullThreshold string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -124,6 +127,11 @@ func main() {
 	flag.StringVar(&buildNamespaceSuffix, "build-namespace-suffix", controller.BuildNamespaceSuffixDefault,
 		"Suffix of the per-project namespace that holds the copied push credential, "+
 			"e.g. -build. Empty keeps the credential in the project namespace.")
+	flag.StringVar(&prewarmNamespace, "prewarm-namespace", "",
+		"Namespace where ImagePrewarm zero-GPU Pods run. Defaults to DEVPILOT_NAMESPACE or devpilot-system.")
+	flag.StringVar(&prepullThreshold, "prepull-threshold", controller.DefaultPrepullThreshold,
+		"Minimum base image manifest size that triggers automatic two-phase GPU-free pre-pulling "+
+			"(e.g. 20Gi). Set to 0 to disable automatic pre-pulling.")
 	flag.StringVar(&dashboardAddr, "dashboard-bind-address", "",
 		"Address the optional web console listens on, e.g. :8082. Every request acts "+
 			"with the bearer token it carries, so the console is never more powerful than its caller. "+
@@ -144,6 +152,11 @@ func main() {
 		setupLog.Error(err, "Failed to parse --registry-default-snapshot-class")
 		os.Exit(1)
 	}
+	prepullThresholdBytes, err := controller.ParsePrepullThreshold(prepullThreshold)
+	if err != nil {
+		setupLog.Error(err, "Failed to parse --prepull-threshold")
+		os.Exit(1)
+	}
 	operatorConfig := controller.Config{
 		InitImage:              initImage,
 		CommitImage:            commitImage,
@@ -154,6 +167,8 @@ func main() {
 		IngressPort:            int32(ingressPort),
 		RetentionReclaim:       retentionReclaim,
 		BuildNamespaceSuffix:   buildNamespaceSuffix,
+		PrewarmNamespace:       prewarmNamespace,
+		PrepullThresholdBytes:  prepullThresholdBytes,
 	}
 	if err := operatorConfig.Validate(); err != nil {
 		setupLog.Error(err, "Invalid operator configuration")
@@ -162,6 +177,8 @@ func main() {
 	setupLog.Info("Loaded operator configuration",
 		"initImage", operatorConfig.InitImage,
 		"commitImage", operatorConfig.CommitImage,
+		"prewarmNamespace", operatorConfig.PrewarmNamespaceOrDefault(),
+		"prepullThresholdBytes", operatorConfig.PrepullThresholdBytes,
 		"defaultSnapshotClasses", operatorConfig.SnapshotClassMapping())
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
@@ -290,6 +307,14 @@ func main() {
 			os.Exit(1)
 		}
 		setupLog.Info("Serving the web console", "address", dashboardAddr)
+	}
+	if err := (&controller.ImagePrewarmReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: operatorConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "imageprewarm")
+		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
 

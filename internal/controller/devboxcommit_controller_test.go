@@ -734,5 +734,57 @@ var _ = Describe("DevBoxCommit Controller", func() {
 			err = k8sClient.Get(ctx, key, &devpilotv1alpha1.DevBoxCommit{})
 			Expect(err).To(HaveOccurred())
 		})
+
+		It("passes zstd:chunked compression, warns on >=5GiB model caches, and creates a post-rebase ImagePrewarm", func() {
+			key := newOfflineCommitWith(namespace, "devbox-prewarm", func(c *devpilotv1alpha1.DevBoxCommit) {
+				c.Spec.Compression = devpilotv1alpha1.CompressionZstdChunked
+				c.Spec.RebaseDevBox = true
+			})
+
+			box := &devpilotv1alpha1.DevBox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "devbox-prewarm"}, box)).To(Succeed())
+			box.Status.LastNodeName = "gpu-node-7"
+			Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+
+			reconciler := newCommitReconciler("")
+			reconcileCommit(reconciler, key)
+
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace, Name: testCommitName + CommitJobSuffix,
+			}, job)).To(Succeed())
+			Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--compression=zstd:chunked"))
+
+			msgBytes, err := json.Marshal(buildResult{
+				BaseDigest:     testDigest,
+				ManifestDigest: testCommitDigest,
+				ConfigDigest:   testCommitDigest,
+				DiffID:         testCommitDigest,
+				LayerSize:      8 << 30,
+				Images:         []string{testCommitRepository + ":" + testCommitTag},
+				Stats:          buildStats{ModelCacheBytes: int64(6) << 30},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			completeBuildJob(job, string(msgBytes))
+
+			ipwName := prewarmPodName("commit-"+namespace, testCommitName)
+			DeferCleanup(func() {
+				_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &devpilotv1alpha1.ImagePrewarm{
+					ObjectMeta: metav1.ObjectMeta{Name: ipwName},
+				}))
+			})
+
+			commit := reconcileCommit(reconciler, key)
+			Expect(commit.Status.Phase).To(Equal(devpilotv1alpha1.CommitPhaseSucceeded))
+			Expect(commit.Status.ModelCacheBytes).To(Equal(int64(6) << 30))
+			Expect(commit.Status.Message).To(ContainSubstring("warning:"))
+			Expect(commit.Status.Message).To(ContainSubstring("prewarming devbox-prewarm on node gpu-node-7"))
+
+			ipw := &devpilotv1alpha1.ImagePrewarm{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ipwName}, ipw)).To(Succeed())
+			Expect(ipw.Spec.Image).To(Equal(testCommitRepository + ":" + testCommitTag))
+			Expect(ipw.Spec.NodeSelector).To(Equal(map[string]string{corev1.LabelHostname: "gpu-node-7"}))
+			Expect(ipw.Spec.TTLHoursAfterComplete).To(Equal(int32(1)))
+		})
 	})
 })

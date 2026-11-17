@@ -1,0 +1,30 @@
+# Reference /etc/containerd-stargz-grpc/config.toml for P2 lazy pulling
+# of OCI zstd:chunked layers produced by devpilot-commit --compression=zstd:chunked.
+
+[cri_keychain]
+enable_keychain = true
+
+# Enable asynchronous background prefetch after mounting the TOC so runtime
+# Python/CUDA imports (e.g. `import torch`) hit local NVMe instead of stalling
+# on small-file HTTP Range requests.
+[prefetch]
+enable = true
+prefetch_timeout_sec = 60
+
+[background_fetch]
+enable = true
+max_concurrency = 4
+fetch_period_msec = 500
+emit_metric = true
+
+[fuse]
+# Keep FUSE passthrough / attributes cached to minimize metadata overhead.
+attr_timeout = 60
+entry_timeout = 60
+negative_timeout = 60
+
+[blob]
+# Allow reading from local Spegel/containerd registry mirrors configured in certs.d.
+valid_interval = 60
+max_retries = 5
+chunk_size = 4194304

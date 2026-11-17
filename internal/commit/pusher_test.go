@@ -250,15 +250,66 @@ func TestPushRejectsZstdForADockerBase(t *testing.T) {
 		t.Fatalf("rewrite base as docker: %v", err)
 	}
 
-	_, err = Push(context.Background(), PushRequest{
+	for _, compression := range []string{CompressionZstd, CompressionZstdChunked} {
+		_, err = Push(context.Background(), PushRequest{
+			BaseReference: base,
+			Repository:    host + "/library/devbox",
+			Tags:          []string{"v1"},
+			UpperDir:      writeTree(t, map[string]string{testModelPath: testModelBody}),
+			Compression:   compression,
+		})
+		if err == nil || !strings.Contains(err.Error(), "gzip") {
+			t.Fatalf("compression %s: err = %v, want a docker manifest refusing it", compression, err)
+		}
+	}
+}
+
+func TestPushZstdChunkedAttachesManifestAnnotations(t *testing.T) {
+	host := testRegistry(t)
+	base := seedBase(t, host)
+
+	result, err := Push(context.Background(), PushRequest{
 		BaseReference: base,
-		Repository:    host + "/library/devbox",
+		Repository:    host + "/library/devbox-chunked",
 		Tags:          []string{"v1"},
-		UpperDir:      writeTree(t, map[string]string{testModelPath: testModelBody}),
-		Compression:   CompressionZstd,
+		UpperDir: writeTree(t, map[string]string{
+			testModelPath: testModelBody,
+			testSSHDPath:  "sshd\n",
+		}),
+		Compression: CompressionZstdChunked,
 	})
-	if err == nil || !strings.Contains(err.Error(), "gzip") {
-		t.Fatalf("err = %v, want a docker manifest refusing a zstd layer", err)
+	if err != nil {
+		t.Fatalf("Push(zstd:chunked): %v", err)
+	}
+	if len(result.Images) != 1 {
+		t.Fatalf("images = %v, want 1", result.Images)
+	}
+
+	ref, err := name.ParseReference(host + "/library/devbox-chunked:v1")
+	if err != nil {
+		t.Fatalf("parse ref: %v", err)
+	}
+	pushed, err := remote.Image(ref)
+	if err != nil {
+		t.Fatalf("read pushed image: %v", err)
+	}
+	manifest, err := pushed.Manifest()
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	layerDesc := manifest.Layers[len(manifest.Layers)-1]
+	if layerDesc.MediaType != types.OCILayerZStd {
+		t.Errorf("MediaType = %v, want OCILayerZStd", layerDesc.MediaType)
+	}
+	if layerDesc.Annotations["containerd.io/snapshot/stargz/toc.digest"] == "" {
+		t.Errorf("missing stargz toc.digest annotation in %v", layerDesc.Annotations)
+	}
+	if layerDesc.Annotations["io.containers.zstd-chunked.manifest-checksum"] == "" {
+		t.Errorf("missing zstd-chunked manifest-checksum annotation in %v", layerDesc.Annotations)
+	}
+	members := layerMembers(t, pushed)
+	if _, ok := members[testModelPath]; !ok {
+		t.Errorf("members = %v, want %s", members, testModelPath)
 	}
 }
 

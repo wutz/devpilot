@@ -67,18 +67,22 @@ var _ = Describe("DevBox Webhook", func() {
 	})
 
 	Context("When defaulting", func() {
-		It("fills the power state and billing mode", func() {
+		It("fills the power state, billing mode and prepull policy", func() {
 			obj.Spec.DesiredState = ""
 			obj.Spec.BillingMode = ""
+			obj.Spec.Scheduling.Prepull = ""
 			Expect(defaulter.Default(ctx, obj)).To(Succeed())
 			Expect(obj.Spec.DesiredState).To(Equal(devpilotv1alpha1.DesiredStateRunning))
 			Expect(obj.Spec.BillingMode).To(Equal(devpilotv1alpha1.BillingModeOnDemand))
+			Expect(obj.Spec.Scheduling.Prepull).To(Equal(devpilotv1alpha1.PrepullPolicyAuto))
 		})
 
-		It("never overrides an explicit stopped state", func() {
+		It("never overrides an explicit stopped state or prepull policy", func() {
 			obj.Spec.DesiredState = devpilotv1alpha1.DesiredStateStopped
+			obj.Spec.Scheduling.Prepull = devpilotv1alpha1.PrepullPolicyNever
 			Expect(defaulter.Default(ctx, obj)).To(Succeed())
 			Expect(obj.Spec.DesiredState).To(Equal(devpilotv1alpha1.DesiredStateStopped))
+			Expect(obj.Spec.Scheduling.Prepull).To(Equal(devpilotv1alpha1.PrepullPolicyNever))
 		})
 	})
 

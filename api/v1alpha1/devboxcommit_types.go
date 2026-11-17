@@ -32,12 +32,13 @@ const (
 )
 
 // CommitCompression selects the layer compression algorithm.
-// +kubebuilder:validation:Enum=zstd;gzip
+// +kubebuilder:validation:Enum=zstd;gzip;zstd:chunked
 type CommitCompression string
 
 const (
-	CompressionZstd CommitCompression = "zstd"
-	CompressionGzip CommitCompression = "gzip"
+	CompressionZstd        CommitCompression = "zstd"
+	CompressionGzip        CommitCompression = "gzip"
+	CompressionZstdChunked CommitCompression = "zstd:chunked"
 )
 
 // CommitPhase is the lifecycle phase of a DevBoxCommit.
@@ -102,6 +103,13 @@ type DevBoxCommitSpec struct {
 	// on the next start. Only allowed for offline commits.
 	// +optional
 	RebaseDevBox bool `json:"rebaseDevBox,omitempty"`
+
+	// prewarmNode creates a short-lived ImagePrewarm targeting the source
+	// DevBox's last node after a successful push so restarting starts with a
+	// warm local cache. When omitted, it defaults to true when rebaseDevBox is
+	// true and false otherwise.
+	// +optional
+	PrewarmNode *bool `json:"prewarmNode,omitempty"`
 }
 
 // CommitDestination is a registry repository plus tags.
@@ -173,6 +181,11 @@ type DevBoxCommitStatus struct {
 
 	// +optional
 	LayerSize int64 `json:"layerSize,omitempty"`
+
+	// modelCacheBytes is the uncompressed size of detected ML model caches
+	// (e.g. ~/.cache/huggingface) in upper/.
+	// +optional
+	ModelCacheBytes int64 `json:"modelCacheBytes,omitempty"`
 
 	// digest is the new manifest digest.
 	// +optional

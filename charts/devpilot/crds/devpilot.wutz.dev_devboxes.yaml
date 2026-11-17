@@ -503,6 +503,28 @@ spec:
                   rule: self.storageClassName == oldSelf.storageClassName
                 - message: rootDisk.size may only grow
                   rule: quantity(self.size).compareTo(quantity(oldSelf.size)) >= 0
+              scheduling:
+                description: scheduling configures sticky node cache affinity and
+                  GPU-free pre-pulling.
+                properties:
+                  prepull:
+                    default: Auto
+                    description: |-
+                      prepull controls GPU-free two-phase pre-pulling before claiming GPUs.
+                      Auto enables it when GPUs > 0, no eligible node caches the image, and
+                      the image size meets the operator threshold. Always forces pre-pull on
+                      GPU DevBoxes when not cached; Never disables it.
+                    enum:
+                    - Auto
+                    - Always
+                    - Never
+                    type: string
+                  stickyNodeAffinity:
+                    description: |-
+                      stickyNodeAffinity prefers scheduling the DevBox back onto status.lastNodeName
+                      so the node's local containerd layer cache is reused. Defaults to true.
+                    type: boolean
+                type: object
               tolerations:
                 description: tolerations are passed through to the pod.
                 items:
@@ -680,9 +702,30 @@ spec:
                     description: ssh is the ssh:// gateway URL.
                     type: string
                 type: object
+              imageCacheState:
+                description: imageCacheState classifies how the node obtains the base
+                  image on start.
+                enum:
+                - ""
+                - CacheHit
+                - P2PPulling
+                - Prepulling
+                - ColdPulling
+                type: string
+              imageSizeBytes:
+                description: imageSizeBytes is the sum of compressed layer sizes from
+                  the image manifest.
+                format: int64
+                type: integer
               interruptedAt:
                 description: interruptedAt records when the devbox last entered Interrupted.
                 format: date-time
+                type: string
+              lastNodeName:
+                description: |-
+                  lastNodeName remembers the last node that ran this devbox so restarts
+                  can prefer the node with a warm containerd image cache. It is retained
+                  across stops and interruptions and cleared on root disk reset.
                 type: string
               message:
                 description: message explains the current phase.
@@ -717,6 +760,16 @@ spec:
                 type: string
               podName:
                 description: podName is the running devbox pod.
+                type: string
+              prepullPodName:
+                description: |-
+                  prepullPodName is the temporary GPU-free pre-pull pod when two-phase
+                  pre-pulling is active.
+                type: string
+              prepulledNode:
+                description: |-
+                  prepulledNode records the node where the current base image was pre-pulled
+                  so the GPU pod prefers scheduling onto it.
                 type: string
               rebaseCount:
                 description: rebaseCount counts completed rebases.
@@ -787,6 +840,7 @@ spec:
                 - ""
                 - AllocatingResources
                 - MountingStorage
+                - PrepullingImage
                 - PullingImage
                 - StartingContainers
                 type: string

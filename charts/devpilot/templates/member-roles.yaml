@@ -47,6 +47,7 @@ rules:
     resources:
       - devboxes
       - devboxcommits
+      - imageprewarms
     verbs:
       - get
       - list
@@ -56,6 +57,7 @@ rules:
     resources:
       - devboxes/status
       - devboxcommits/status
+      - imageprewarms/status
     verbs:
       - get
 {{- end }}

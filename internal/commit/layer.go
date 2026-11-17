@@ -22,11 +22,16 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 
+	"github.com/containerd/stargz-snapshotter/estargz"
+	"github.com/containerd/stargz-snapshotter/estargz/zstdchunked"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/klauspost/compress/zstd"
 )
 
 // stagedLayer is a finished layer blob on local scratch disk.
@@ -44,6 +49,7 @@ type stagedLayer struct {
 	digest      v1.Hash
 	diffID      v1.Hash
 	size        int64
+	annotations map[string]string
 	stats       Stats
 }
 
@@ -62,6 +68,10 @@ func stageLayer(opts Options, compression string, scratchDir string) (*stagedLay
 	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create scratch dir: %w", err)
 	}
+	if compression == CompressionZstdChunked {
+		return stageZstdChunkedLayer(opts, media, scratchDir)
+	}
+
 	file, err := os.CreateTemp(scratchDir, "devpilot-layer-*.tar")
 	if err != nil {
 		return nil, fmt.Errorf("create scratch file: %w", err)
@@ -107,6 +117,97 @@ func stageLayer(opts Options, compression string, scratchDir string) (*stagedLay
 	return staged, nil
 }
 
+// stageZstdChunkedLayer writes the raw tar stream to scratch, then builds a
+// seekable zstd:chunked OCI blob with an embedded TOC and landmark priorities.
+func stageZstdChunkedLayer(opts Options, media types.MediaType, scratchDir string) (*stagedLayer, error) {
+	rawFile, err := os.CreateTemp(scratchDir, "devpilot-raw-*.tar")
+	if err != nil {
+		return nil, fmt.Errorf("create raw tar scratch file: %w", err)
+	}
+	rawPath := rawFile.Name()
+	defer func() {
+		_ = rawFile.Close()
+		_ = os.Remove(rawPath)
+	}()
+
+	stats, keptFiles, err := writeLayer(rawFile, opts)
+	if err != nil {
+		return nil, err
+	}
+	rawInfo, err := rawFile.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat raw tar scratch file: %w", err)
+	}
+
+	metadata := make(map[string]string)
+	zc := struct {
+		*zstdchunked.Compressor
+		*zstdchunked.Decompressor
+	}{
+		Compressor: &zstdchunked.Compressor{
+			CompressionLevel: zstd.SpeedDefault,
+			Metadata:         metadata,
+		},
+		Decompressor: &zstdchunked.Decompressor{},
+	}
+	prioritized := prioritizedLandmarkFiles(keptFiles)
+	var missed []string
+	buildOpts := []estargz.Option{
+		estargz.WithCompression(zc),
+		estargz.WithAllowPrioritizeNotFound(&missed),
+	}
+	if len(prioritized) > 0 {
+		buildOpts = append(buildOpts, estargz.WithPrioritizedFiles(prioritized))
+	}
+	blob, err := estargz.Build(io.NewSectionReader(rawFile, 0, rawInfo.Size()), buildOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("build zstd:chunked layer: %w", err)
+	}
+	defer func() { _ = blob.Close() }()
+
+	file, err := os.CreateTemp(scratchDir, "devpilot-layer-*.tar")
+	if err != nil {
+		return nil, fmt.Errorf("create scratch file: %w", err)
+	}
+	path := file.Name()
+
+	compressedHash := sha256.New()
+	counter := &countWriter{}
+	if _, err := io.Copy(io.MultiWriter(newDigestCounter(compressedHash, counter), file), blob); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("write zstd:chunked layer: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("close scratch file: %w", err)
+	}
+
+	diffDigest := blob.DiffID()
+	diffID, err := v1.NewHash(diffDigest.String())
+	if err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("parse zstd:chunked diff id %q: %w", diffDigest.String(), err)
+	}
+
+	annotations := map[string]string{
+		estargz.TOCJSONDigestAnnotation:         blob.TOCDigest().String(),
+		estargz.StoreUncompressedSizeAnnotation: strconv.FormatInt(rawInfo.Size(), 10),
+	}
+	maps.Copy(annotations, metadata)
+
+	return &stagedLayer{
+		path:        path,
+		compression: CompressionZstdChunked,
+		mediaType:   media,
+		digest:      hashOf(compressedHash),
+		diffID:      diffID,
+		size:        counter.n,
+		annotations: annotations,
+		stats:       stats,
+	}, nil
+}
+
 // Compressed returns the staged blob for upload.
 func (l *stagedLayer) Compressed() (io.ReadCloser, error) {
 	return os.Open(l.path)
@@ -134,6 +235,9 @@ func (l *stagedLayer) DiffID() (v1.Hash, error) { return l.diffID, nil }
 func (l *stagedLayer) Size() (int64, error) { return l.size, nil }
 
 func (l *stagedLayer) MediaType() (types.MediaType, error) { return l.mediaType, nil }
+
+// Annotations returns OCI descriptor annotations (populated for zstd:chunked).
+func (l *stagedLayer) Annotations() map[string]string { return l.annotations }
 
 // Discard removes the scratch blob. It is safe to call more than once.
 func (l *stagedLayer) Discard() { _ = os.Remove(l.path) }

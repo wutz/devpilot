@@ -51,6 +51,10 @@ spec:
             - --registry-default-snapshot-class={{ include "devpilot.defaultSnapshotClasses" . | quote }}
             - --retention-reclaim={{ .Values.retention.reclaim }}
             - --build-namespace-suffix={{ .Values.build.namespaceSuffix | quote }}
+            {{- with .Values.prewarm.namespace }}
+            - --prewarm-namespace={{ . }}
+            {{- end }}
+            - --prepull-threshold={{ .Values.prepull.threshold }}
             {{- if .Values.dashboard.enabled }}
             - --dashboard-bind-address={{ .Values.dashboard.bindAddress }}
             {{- with .Values.dashboard.tokenCommand }}

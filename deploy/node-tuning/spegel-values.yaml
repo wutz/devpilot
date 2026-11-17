@@ -1,0 +1,28 @@
+# Reference Helm values for Spegel (stateless P2P OCI registry mirror)
+# tuned for DevPilot GPU clusters.
+
+spegel:
+  # DevPilot resolves every image reference to an immutable @sha256:... digest
+  # before creating Pods, so mutable tag resolution in P2P is unnecessary.
+  resolveLatestTag: false
+
+  # Only mirror registries that host DevBox base images and committed snapshots.
+  # Leave empty to mirror all configured registries, or restrict to your Harbor/NGC mirrors.
+  registries: []
+
+  mirrorResolveRetries: 3
+  mirrorResolveTimeout: 20ms
+
+  containerdSocket: /run/containerd/containerd.sock
+  containerdNamespace: k8s.io
+  containerdContentPath: /var/lib/containerd/io.containerd.content.v1.content
+  containerdRegistryConfigPath: /etc/containerd/certs.d
+  appendMirrors: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi

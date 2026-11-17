@@ -61,15 +61,38 @@ const (
 )
 
 // StartingStep reports granular progress while phase is Starting.
-// +kubebuilder:validation:Enum="";AllocatingResources;MountingStorage;PullingImage;StartingContainers
+// +kubebuilder:validation:Enum="";AllocatingResources;MountingStorage;PrepullingImage;PullingImage;StartingContainers
 type StartingStep string
 
 const (
 	StartingStepNone                StartingStep = ""
 	StartingStepAllocatingResources StartingStep = "AllocatingResources"
 	StartingStepMountingStorage     StartingStep = "MountingStorage"
+	StartingStepPrepullingImage     StartingStep = "PrepullingImage"
 	StartingStepPullingImage        StartingStep = "PullingImage"
 	StartingStepStartingContainers  StartingStep = "StartingContainers"
+)
+
+// ImageCacheState classifies how the DevBox obtains its base image on start.
+// +kubebuilder:validation:Enum="";CacheHit;P2PPulling;Prepulling;ColdPulling
+type ImageCacheState string
+
+const (
+	ImageCacheStateNone        ImageCacheState = ""
+	ImageCacheStateCacheHit    ImageCacheState = "CacheHit"
+	ImageCacheStateP2PPulling  ImageCacheState = "P2PPulling"
+	ImageCacheStatePrepulling  ImageCacheState = "Prepulling"
+	ImageCacheStateColdPulling ImageCacheState = "ColdPulling"
+)
+
+// PrepullPolicy controls GPU-free two-phase image pre-pulling.
+// +kubebuilder:validation:Enum=Auto;Always;Never
+type PrepullPolicy string
+
+const (
+	PrepullPolicyAuto   PrepullPolicy = "Auto"
+	PrepullPolicyAlways PrepullPolicy = "Always"
+	PrepullPolicyNever  PrepullPolicy = "Never"
 )
 
 // SegmentEndReason closes a billing segment.
@@ -162,6 +185,26 @@ type DevBoxSpec struct {
 	// tolerations are passed through to the pod.
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// scheduling configures sticky node cache affinity and GPU-free pre-pulling.
+	// +optional
+	Scheduling DevBoxScheduling `json:"scheduling,omitempty"`
+}
+
+// DevBoxScheduling configures image locality and pre-pull scheduling hints.
+type DevBoxScheduling struct {
+	// stickyNodeAffinity prefers scheduling the DevBox back onto status.lastNodeName
+	// so the node's local containerd layer cache is reused. Defaults to true.
+	// +optional
+	StickyNodeAffinity *bool `json:"stickyNodeAffinity,omitempty"`
+
+	// prepull controls GPU-free two-phase pre-pulling before claiming GPUs.
+	// Auto enables it when GPUs > 0, no eligible node caches the image, and
+	// the image size meets the operator threshold. Always forces pre-pull on
+	// GPU DevBoxes when not cached; Never disables it.
+	// +optional
+	// +kubebuilder:default=Auto
+	Prepull PrepullPolicy `json:"prepull,omitempty"`
 }
 
 // DevBoxResources describes the compute shape of a DevBox.
@@ -440,6 +483,30 @@ type DevBoxStatus struct {
 	// nodeName is the node hosting the devbox pod.
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
+
+	// lastNodeName remembers the last node that ran this devbox so restarts
+	// can prefer the node with a warm containerd image cache. It is retained
+	// across stops and interruptions and cleared on root disk reset.
+	// +optional
+	LastNodeName string `json:"lastNodeName,omitempty"`
+
+	// imageCacheState classifies how the node obtains the base image on start.
+	// +optional
+	ImageCacheState ImageCacheState `json:"imageCacheState,omitempty"`
+
+	// imageSizeBytes is the sum of compressed layer sizes from the image manifest.
+	// +optional
+	ImageSizeBytes int64 `json:"imageSizeBytes,omitempty"`
+
+	// prepullPodName is the temporary GPU-free pre-pull pod when two-phase
+	// pre-pulling is active.
+	// +optional
+	PrepullPodName string `json:"prepullPodName,omitempty"`
+
+	// prepulledNode records the node where the current base image was pre-pulled
+	// so the GPU pod prefers scheduling onto it.
+	// +optional
+	PrepulledNode string `json:"prepulledNode,omitempty"`
 
 	// endpoints are the externally reachable URLs.
 	// +optional

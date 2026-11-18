@@ -22,6 +22,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 )
@@ -70,6 +71,23 @@ type Config struct {
 	// layer sizes) that triggers automatic two-phase GPU-free pre-pulling when
 	// DevBox.spec.scheduling.prepull is Auto. Zero disables Auto pre-pulling.
 	PrepullThresholdBytes int64
+	// CommitFreezeTimeout bounds how long an online commit keeps the root disk
+	// frozen while it waits for the CSI driver to cut the snapshot. Zero means
+	// DefaultCommitFreezeTimeout.
+	CommitFreezeTimeout time.Duration
+}
+
+// DefaultCommitFreezeTimeout is the freeze window when the operator does not
+// choose one: long enough for a COW snapshot, short enough that the DevBox's
+// writers notice no more than a pause.
+const DefaultCommitFreezeTimeout = 30 * time.Second
+
+// CommitFreezeWindow returns the effective freeze window.
+func (c Config) CommitFreezeWindow() time.Duration {
+	if c.CommitFreezeTimeout <= 0 {
+		return DefaultCommitFreezeTimeout
+	}
+	return c.CommitFreezeTimeout
 }
 
 // The two ways an expired root disk is reclaimed.
@@ -205,6 +223,9 @@ func (c Config) Validate() error {
 	}
 	if c.PrepullThresholdBytes < 0 {
 		errs = append(errs, fmt.Errorf("prepull threshold %d must be non-negative", c.PrepullThresholdBytes))
+	}
+	if c.CommitFreezeTimeout < 0 {
+		errs = append(errs, fmt.Errorf("commit freeze timeout %s must not be negative", c.CommitFreezeTimeout))
 	}
 	return errors.Join(errs...)
 }

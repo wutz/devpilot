@@ -19,6 +19,7 @@ package controller
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 const testInitImage = "ghcr.io/wutz/devpilot-init:v0.1.0"
@@ -230,5 +231,17 @@ func TestParsePrepullThreshold(t *testing.T) {
 	cfg := Config{InitImage: testInitImage, PrepullThresholdBytes: -1}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() accepted negative PrepullThresholdBytes")
+	}
+}
+
+func TestConfigCommitFreezeWindow(t *testing.T) {
+	if got := (Config{}).CommitFreezeWindow(); got != DefaultCommitFreezeTimeout {
+		t.Errorf("CommitFreezeWindow() = %s, want the %s default", got, DefaultCommitFreezeTimeout)
+	}
+	if got := (Config{CommitFreezeTimeout: 5 * time.Second}).CommitFreezeWindow(); got != 5*time.Second {
+		t.Errorf("CommitFreezeWindow() = %s, want 5s", got)
+	}
+	if err := (Config{InitImage: "init", CommitFreezeTimeout: -time.Second}).Validate(); err == nil {
+		t.Error("Validate() accepted a negative freeze timeout")
 	}
 }

@@ -154,3 +154,72 @@ defaults:
   snapshotClassByStorageClass:
     block-nvme: csi-rbdplugin-snapclass
     block-vast-cs: vast-snapshot-cs
+
+# Optional CSI driver for root disks on a shared filesystem (IBM Storage
+# Scale, VAST NFS, CephFS): every root disk is a sparse ext4 image
+# (disk.img) the node plugin mounts through a loop device with direct I/O.
+# Use it where no block storage is available. See
+# docs/shared-storage-disk-img.md for the stability and performance
+# trade-offs and the PoC checklist to run before enabling it.
+loopCSI:
+  enabled: false
+  image:
+    repository: ghcr.io/wutz/devpilot-loop-csi
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Shared-filesystem directories volumes are created in. Each must be
+  # mounted at the same path on every node that runs DevBoxes and on the node
+  # running the controller, before the pods start.
+  #   - name: vast
+  #     path: /mnt/vast/devpilot-rootdisks
+  pools: []
+  # One StorageClass per entry; DevBoxes select it in spec.rootDisk.
+  #   - name: shared-loop-vast
+  #     pool: vast
+  #     directIO: required     # required | preferred | off
+  #     trimOnUnmount: true    # FITRIM before unmount to punch holes
+  #     trimMinLength: "1048576"
+  #     mmp: true              # ext4 multi-mount protection
+  #     reclaimPolicy: Delete
+  storageClasses: []
+  snapshotClass:
+    create: true
+    name: devpilot-loop-snapclass
+    # auto (reflink, else copy) | reflink | copy | cephfs-snapdir
+    strategy: auto
+    # The DevPilot controller freezes the root disk around CreateSnapshot,
+    # which makes a copy of a mounted image consistent. The copy then runs
+    # while the DevBox is frozen: on filesystems without reflink (Storage
+    # Scale, most NFS) raise the manager's --commit-freeze-timeout (via
+    # extraArgs) or commit stopped DevBoxes.
+    allowLiveCopy: true
+    deletionPolicy: Delete
+  kubeletDir: /var/lib/kubelet
+  leaseInterval: 10s
+  leaseTTL: 45s
+  # CreateVolume from a snapshot and CreateSnapshot copy the image when the
+  # filesystem has no reflink.
+  operationTimeout: 600s
+  logLevel: info
+  sidecars:
+    provisioner: registry.k8s.io/sig-storage/csi-provisioner:v5.3.0
+    resizer: registry.k8s.io/sig-storage/csi-resizer:v1.14.0
+    snapshotter: registry.k8s.io/sig-storage/csi-snapshotter:v8.3.0
+    nodeDriverRegistrar: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.14.0
+  controller:
+    priorityClassName: system-cluster-critical
+    nodeSelector: {}
+    tolerations: []
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+  node:
+    priorityClassName: system-node-critical
+    nodeSelector: {}
+    tolerations:
+      - operator: Exists
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi

@@ -49,8 +49,11 @@ const whiteoutMode fs.FileMode = 0o600
 
 // Options configures one scan.
 type Options struct {
-	// UpperDir is the directory to package, normally <root>/upper.
+	// UpperDir is the directory to package, normally <root>/upper. It is
+	// ignored when Source is set.
 	UpperDir string
+	// Source overrides UpperDir, e.g. with an ext4 image source.
+	Source Source
 	// OpaqueDirs lists directories whose lower content must be hidden. It is
 	// the snapshot devpilot-init wrote while it still held CAP_SYS_ADMIN; an
 	// unprivileged process cannot read trusted.overlay.opaque itself.
@@ -92,15 +95,16 @@ func WriteLayer(w io.Writer, opts Options) (Stats, error) {
 
 func writeLayer(w io.Writer, opts Options) (Stats, []string, error) {
 	var stats Stats
-	if opts.UpperDir == "" {
-		return stats, nil, errors.New("upper dir is required")
-	}
-	info, err := osStat(opts.UpperDir)
-	if err != nil {
-		return stats, nil, fmt.Errorf("stat upper dir: %w", err)
-	}
-	if !info.IsDir() {
-		return stats, nil, fmt.Errorf("upper dir %s is not a directory", opts.UpperDir)
+	src := opts.Source
+	if src == nil {
+		if opts.UpperDir == "" {
+			return stats, nil, errors.New("upper dir is required")
+		}
+		dir := DirSource{Root: opts.UpperDir}
+		if err := dir.Check(); err != nil {
+			return stats, nil, err
+		}
+		src = dir
 	}
 
 	excludes, err := compileExcludes(opts.ExcludePaths, opts.CleanPackageCache)
@@ -112,7 +116,7 @@ func writeLayer(w io.Writer, opts Options) (Stats, []string, error) {
 		return stats, nil, err
 	}
 
-	entries, err := collectEntries(opts.UpperDir, excludes)
+	entries, err := collectEntries(src, excludes)
 	if err != nil {
 		return stats, nil, err
 	}
@@ -128,7 +132,7 @@ func writeLayer(w io.Writer, opts Options) (Stats, []string, error) {
 	hardlinks := make(map[uint64]string)
 	var keptFiles []string
 	for _, e := range entries.kept {
-		if err := writeEntry(tw, e, opaque, hardlinks, &stats); err != nil {
+		if err := writeEntry(tw, src, e, opaque, hardlinks, &stats); err != nil {
 			return stats, nil, err
 		}
 		if e.info.Mode().IsRegular() {
@@ -144,9 +148,7 @@ func writeLayer(w io.Writer, opts Options) (Stats, []string, error) {
 // entry is one path discovered in upper/, in walk (lexical) order.
 type entry struct {
 	// rel is the slash separated path below upper/.
-	rel string
-	// abs is where it lives on disk.
-	abs  string
+	rel  string
 	info fs.FileInfo
 }
 
@@ -158,60 +160,32 @@ type collected struct {
 // collectEntries walks upper/ once, keeping only what the layer should carry.
 // It never follows symlinks: a symlink out of upper/ is recorded as a link, and
 // its target is irrelevant to the layer.
-func collectEntries(upper string, excludes []excludeRule) (collected, error) {
+func collectEntries(src Source, excludes []excludeRule) (collected, error) {
 	var out collected
-	err := filepath.WalkDir(upper, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Entries deleted while the scan runs (tmp files, logs) are not
-			// worth failing a commit over.
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		if p == upper {
-			return nil
-		}
-		rel, err := filepath.Rel(upper, p)
-		if err != nil {
-			return fmt.Errorf("compute relative path of %s: %w", p, err)
-		}
-		rel = filepath.ToSlash(rel)
-
+	err := src.Walk(func(rel string, info fs.FileInfo) error {
 		if excludesMatched(excludes, rel) {
-			if d.IsDir() {
-				// Skipping a directory means skipping everything below it.
-				out.skipped = append(out.skipped, rel)
-				return filepath.SkipDir
-			}
 			out.skipped = append(out.skipped, rel)
+			if info.IsDir() {
+				// Skipping a directory means skipping everything below it.
+				return fs.SkipDir
+			}
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		out.kept = append(out.kept, entry{rel: rel, abs: p, info: info})
+		out.kept = append(out.kept, entry{rel: rel, info: info})
 		return nil
 	})
-	if err != nil {
-		return out, fmt.Errorf("walk upper dir: %w", err)
-	}
-	return out, nil
+	return out, err
 }
 
 // writeEntry renders one discovered path: a whiteout, an opaque marker, a
 // hardlink, or the file itself.
-func writeEntry(tw *tar.Writer, e entry, opaque map[string]struct{}, hardlinks map[uint64]string, stats *Stats) error {
+func writeEntry(tw *tar.Writer, src Source, e entry, opaque map[string]struct{}, hardlinks map[uint64]string, stats *Stats) error {
 	mode := e.info.Mode()
 
 	// A 0:0 character device is OverlayFS's way of recording a deletion.
 	// Writing it through would make the layer carry a bogus device node, and
 	// unpackers without CAP_MKNOD would fail.
-	if mode&fs.ModeCharDevice != 0 && isZeroDevice(e.info) {
+	if src.IsWhiteout(e.info) {
 		if err := tw.WriteHeader(&tar.Header{
 			Typeflag: tar.TypeReg,
 			Name:     path.Join(path.Dir(e.rel), WhiteoutPrefix+path.Base(e.rel)),
@@ -236,7 +210,7 @@ func writeEntry(tw *tar.Writer, e entry, opaque map[string]struct{}, hardlinks m
 		}); err != nil {
 			return fmt.Errorf("write directory %s: %w", e.rel, err)
 		}
-		if _, ok := opaque[e.rel]; ok {
+		if _, ok := opaque[e.rel]; ok || src.Opaque(e.rel, e.info) {
 			if err := tw.WriteHeader(&tar.Header{
 				Typeflag: tar.TypeReg,
 				Name:     path.Join(e.rel, OpaqueMarker),
@@ -254,7 +228,7 @@ func writeEntry(tw *tar.Writer, e entry, opaque map[string]struct{}, hardlinks m
 
 	switch {
 	case mode&fs.ModeSymlink != 0:
-		target, err := readlink(e.abs)
+		target, err := src.Readlink(e.rel, e.info)
 		if err != nil {
 			return fmt.Errorf("read symlink %s: %w", e.rel, err)
 		}
@@ -271,7 +245,7 @@ func writeEntry(tw *tar.Writer, e entry, opaque map[string]struct{}, hardlinks m
 		stats.Files++
 		return nil
 	case mode.IsRegular():
-		return writeRegular(tw, e, hardlinks, stats)
+		return writeRegular(tw, src, e, hardlinks, stats)
 	default:
 		// FIFOs and sockets have no meaning in an image layer and cannot be
 		// created by an unpacker without privileges.
@@ -281,8 +255,8 @@ func writeEntry(tw *tar.Writer, e entry, opaque map[string]struct{}, hardlinks m
 
 // writeRegular writes a file, or a link when an earlier path already carried
 // the same inode. Conda and npm install trees are full of hardlinks.
-func writeRegular(tw *tar.Writer, e entry, hardlinks map[uint64]string, stats *Stats) error {
-	if ino, ok := inodeOf(e.info); ok && e.info.Sys() != nil {
+func writeRegular(tw *tar.Writer, src Source, e entry, hardlinks map[uint64]string, stats *Stats) error {
+	if ino, ok := src.Inode(e.info); ok {
 		if first, seen := hardlinks[ino]; seen {
 			if err := tw.WriteHeader(&tar.Header{
 				Typeflag: tar.TypeLink,
@@ -300,7 +274,7 @@ func writeRegular(tw *tar.Writer, e entry, hardlinks map[uint64]string, stats *S
 		hardlinks[ino] = e.rel
 	}
 
-	f, err := openRegular(e.abs)
+	f, err := src.Open(e.rel, e.info)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", e.rel, err)
 	}

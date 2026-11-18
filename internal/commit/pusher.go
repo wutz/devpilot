@@ -63,6 +63,8 @@ type PushRequest struct {
 	Tags []string
 	// UpperDir is the scanned overlay upper/ directory.
 	UpperDir string
+	// Source replaces UpperDir, e.g. with the upper/ tree of a disk.img.
+	Source Source
 	// OpaqueDirs is the snapshot from .meta/opaque-dirs.json.
 	OpaqueDirs []string
 	// ExcludePaths are extra globs.
@@ -132,6 +134,7 @@ func Push(ctx context.Context, req PushRequest) (*PushResult, error) {
 
 	layer, err := stageLayer(Options{
 		UpperDir:          req.UpperDir,
+		Source:            req.Source,
 		OpaqueDirs:        req.OpaqueDirs,
 		ExcludePaths:      req.ExcludePaths,
 		CleanPackageCache: req.CleanPackageCache,

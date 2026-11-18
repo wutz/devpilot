@@ -149,7 +149,7 @@ Linux 内核规定 `trusted.*` 命名空间的扩展属性（xattr）只有具�
    - 在 `devpilot-init`（本身在容器内拥有受控 `CAP_SYS_ADMIN`）收到快照前 `sync` 指令或优雅停机 `SIGTERM` 时，快速扫描一次 `upper/` 目录树（仅 `readdir` 目录节点，不读文件内容，十万目录毫秒级完成），将所有含 `trusted.overlay.opaque=y` 的相对目录路径写入 `.meta/opaque-dirs.json`。
 2. **`devpilot-commit` 读取**：
    - `devpilot-commit` 完全以非特权运行（`allowPrivilegeEscalation: false`、`capabilities.drop: ["ALL"]`、`seccompProfile: RuntimeDefault`），结合 `.meta/opaque-dirs.json` 与 `user.overlay.opaque` xattr 生成 `.wh..wh..opq`。
-   - 即便发生极端断电未更新 `opaque-dirs.json`，也可在隔离构建命名空间 `<ns>-build`（与 `imagebuild` 相同的受控命名空间）为扫描器单独授予只读挂载下的 `CAP_SYS_ADMIN` 读取 `trusted.overlay.opaque`，两者互为兜底。
+   - **共享存储 `disk.img` 模式兜底**：当构建 Pod 挂载的是 [`devpilot-loop-csi`](shared-storage-disk-img.md) 提供的 `ModeRaw` 只读卷（`/mnt/.devpilot-rootdisk` 下无 `upper/` 而存在 `disk.img`）时，`openCommitInput` 直接调用 [`internal/ext4`](../internal/ext4) 纯 Go 只读解析器（支持内存 jbd2 日志重放）并通过 [`commit.Ext4Source`](../internal/commit/ext4source.go) 流式遍历，在非特权状态下即可直接读取原始 `ext4` 扩展属性中的 `trusted.overlay.opaque` 与 `0:0` whiteout，无需挂载块设备。
 
 ### 3.4 默认排除列表（Exclude Rules）
 
@@ -175,9 +175,9 @@ Linux 内核规定 `trusted.*` 命名空间的扩展属性（xattr）只有具�
   rootdisk PVC (未挂载) ──(ReadOnlyMany / RWO 只读挂载)──► Commit Job ──► Harbor
 
 情况 B：DevBox 处于 Running（在线热提交，不中断 GPU 进程）
-  1. Operator 调用 Pod 内 devpilot-init 管理接口执行 sync + 刷新 .meta/opaque-dirs.json
-  2. 创建 VolumeSnapshot (引用 csi-rbdplugin-snapclass 或 vast-snapshot-cs)
-  3. 等待 VolumeSnapshot.status.readyToUse == true (Ceph RBD / VAST 秒级 COW 快照)
+  1. Operator 调用 Pod 内 devpilot-init 管理接口执行 sync + 刷新 .meta/opaque-dirs.json（Freeze 模式则调用 --freeze）
+  2. 创建 VolumeSnapshot (引用 csi-rbdplugin-snapclass、vast-snapshot-cs 或 devpilot-loop-snapclass)
+  3. 等待 VolumeSnapshot 确认切点并变为 readyToUse == true (Freeze 模式在确认切点后立即解冻)
   4. 从 VolumeSnapshot 恢复临时只读 PVC: commit-<name>-ro
   5. 启动 Commit Job (可调度在任意普通 CPU 节点) 流式打包并推送到 Harbor
   6. 成功后删除临时 PVC 与 VolumeSnapshot (通过 OwnerReference + Finalizer 双重保障清理)
@@ -185,9 +185,9 @@ Linux 内核规定 `trusted.*` 命名空间的扩展属性（xattr）只有具�
 
 ### 在线一致性保障
 
-- **默认模式（`consistency: Sync`）**：触发内核 `sync()` 将文件系统页缓存刷盘后立即打 CSI 快照，对开发机内正在运行的 GPU 训练零停顿，满足 99% 交互式配好环境后保存镜像的场景（此时 `apt`/`conda` 命令已执行完毕）。
-- **严格冻结模式（`consistency: Freeze`，可选）**：通过 `devpilot-init` 对 `/mnt/.devpilot-rootdisk` 执行 `FIFREEZE` ioctl 冻结文件系统写操作，创建 `VolumeSnapshot` 对象后立即 `FITHAW` 解冻（设置硬超时 3 秒自动解冻防死锁），实现严格的崩溃一致性快照。
-- **无 CSI Snapshot 环境降级**：当 StorageClass 未配置对应的 `VolumeSnapshotClass` 时，Operator 通过 `podAffinity` 将 Commit Job 调度到 `DevBox` 所在同一宿主机节点，以 `readOnly: true` 共享挂载该 RWO 卷完成构建；若 CSI 驱动连同节点多 Pod 挂载也拒绝，则明确报错提示用户先关机再提交。
+- **默认模式（`consistency: Sync`）**：对于原生块存储 PVC，触发容器内 `/proc/1/exe --flush` 将文件系统页缓存刷盘后立即打 CSI 快照，对开发机内正在运行的 GPU 训练零停顿。对于 **`loop.devpilot.wutz.dev` 根盘 PVC**，[`DevBoxCommitReconciler`](../internal/controller/devboxcommit_freeze.go) 会自动将 `Sync` 提升为 `Freeze`，避免在 `disk.img` 仍被写入时复制出撕裂镜像。
+- **严格冻结模式（`consistency: Freeze`）**：控制器通过 `pods/exec` 调起容器内 `/proc/1/exe --freeze --freeze-timeout=<window+10s>` 执行 `syncfs` + `FIFREEZE`，在窗口 `--commit-freeze-timeout`（默认 `30s`）内创建并确认快照切点（`CreationTime` 或 `ReadyToUse`）后再关闭 stdin 正常解冻；只有确认在全程保持冻结（helper `exit 0`）期间完成切点的快照才会被保留，否则立即销毁快照并标为 `FreezeFailed`。
+- **无 CSI Snapshot 环境降级**：当 StorageClass 未配置对应的 `VolumeSnapshotClass` 时，Operator 提示等待停机后走离线提交（`OfflineOnly` 语义）。
 
 ---
 
@@ -200,5 +200,5 @@ Linux 内核规定 `trusted.*` 命名空间的扩展属性（xattr）只有具�
   - **停机变基流程**：
     1. `devpilot-commit` 将静态一致的 `base + upper` 固化推送到 Harbor 得到新镜像 `repo:tag@sha256:new_digest`；
     2. Operator 将 `DevBox` 的 `status.pendingRebaseImage` 记录为该新镜像摘要；
-    3. 下次用户开机启动 `DevBox` 时，Operator 以 `new_digest` 拉起 Pod，`devpilot-init` 校验新底座镜像就绪后，原子清理旧 `upper/` + `work/` 并重写 `.meta/base-image.json`（`rebaseCount + 1`）。
-    4. 自此 `upper/` 归零轻装上阵，文件系统状态 100% 连续无损（配合 `bz1-dev1` 已部署的 `spegel` P2P 镜像分发加速节点拉取）。
+    3. 下次用户开机启动 `DevBox` 时，Operator 以 `new_digest` 拉起 Pod，`devpilot-init` 校验新底座镜像就绪后，调用 [`initroot.RebaseUpper`](../internal/initroot/baseimage.go) 原子清理旧 `upper/` + `work/` + `merged/` 并重写 `.meta/base-image.json`（`rebaseCount + 1`）。
+    4. 自此 `upper/` 归零轻装上阵，文件系统状态 100% 连续无损（配合 `bz1-dev1` 已部署的 `spegel` P2P 镜像分发加速节点拉取）。若在共享存储 `disk.img` 且底层不支持 `FITRIM` 打洞的环境上需要彻底归零物理高水位，可在停机态使用 `devpilot.wutz.dev/action: reset-rootdisk` 重建 PVC。

@@ -43,7 +43,7 @@
 > 2. **守护进程单点故障（SPOF）**：`fuse-overlayfs` 是运行在容器内的用户态守护进程，一旦用户训练/预处理打满容器内存 Cgroup 触发 OOM 波及该进程或发生崩溃，整个容器根盘立即报 `Transport endpoint is not connected` 彻底瘫痪且无法恢复。
 > 3. **NFS 语义冲突与元数据延迟放大**：NFSv3 删除打开中的文件会产生 `.nfsXXXX`（silly rename）残留，导致 `pip`/`conda`/`apt` 删除非空目录时偶发 `EBUSY / Directory not empty`；同时 `import torch` 数万次串行 `stat()` 经由 FUSE 上下文切换叠加网络 RTT 会导致启动与 IDE 索引显著变慢。
 >
-> 因此职责划分非常清晰：**根盘（`rootdisk`）坚持采用 `ReadWriteOnce` 块存储格式化 `ext4/xfs` 跑内核态 `overlay`**；海量数据集与多机共享目录则挂载 `ReadWriteMany` 共享文件系统（`shared-vast-cs` / `shared-juice`）。
+> 因此职责划分非常清晰：**根盘（`rootdisk`）坚持采用 `ReadWriteOnce` 块存储格式化 `ext4/xfs` 跑内核态 `overlay`**；海量数据集与多机共享目录则挂载 `ReadWriteMany` 共享文件系统（`shared-vast-cs` / `shared-juice`）。针对仅有 GPFS、VAST NFS 或 CephFS 而无独立块存储 CSI 的智算/超算集群，可启用可选的共享存储稀疏 `disk.img` 后端（`loop.devpilot.wutz.dev`，默认关闭）——详见 [共享存储可选 `disk.img` 根盘架构设计与实现说明](shared-storage-disk-img.md)。
 
 ---
 

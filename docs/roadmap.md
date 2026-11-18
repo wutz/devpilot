@@ -195,3 +195,18 @@
 > - 回读 registry 的 manifest 复核：**77 层**（76 基础 + 1 增量），压缩后合计 **14,261.9 MB**，末层 **3,222.2 MB**（即那个 3 GiB 增量，与此前 `m5-big` 单独上传的 3,222,209,296 字节吻合）；
 > - 传输形态：基础层按 64 MiB 逐块 PATCH（日志里可见 `offset=67108864 total=3572…`、`offset=103092640 total=…` 这类推进），已存在的层被 HEAD 跳过并打出 `Layer blob already in the repository`。因此断了也只丢一块，而不是丢掉一条 3.5 GB 的请求；
 > - 资源回收正常：提交结束后 build pod 与本次提交专用的临时凭证 `m5-big2-registry` 都已删除，`devpilot-verify-build` 里的 `harbor-push` 保留。
+
+---
+
+## M6 共享存储可选 `disk.img` 根盘后端（实验性实现，待目标集群 PoC）
+
+目标：在无分布式块存储 CSI 的共享并行存储（GPFS / VAST NFS / CephFS）上，通过宿主机 Loop CSI + 用户态只读 `ext4` 解析器实现与块存储同构的非特权 DevBox 与在线/离线 Commit（详见 [shared-storage-disk-img.md](shared-storage-disk-img.md)）。
+
+- [x] 实现 [`internal/loopdev`](../internal/loopdev)（Linux `LOOP_CONFIGURE` / 4 KiB 块 / `LO_FLAGS_DIRECT_IO` 回读校验 / `LO_FLAGS_AUTOCLEAR` / `FIFREEZE` / `FITHAW` / `FITRIM`）
+- [x] 实现 [`internal/loopcsi`](../internal/loopcsi) 与 [`cmd/devpilot-loop-csi`](../cmd/devpilot-loop-csi/main.go)（`loop.devpilot.wutz.dev` CSI Controller & Node，Publish-only 分流 `ModeReadWrite` 与 `ModeRaw`、`disk.img` `F_OFD_SETLK` 独占锁 + `disk.img.lease` 心跳 + `ext4` MMP 三层防脑裂、在线扩容、稀疏拷贝/`FICLONE`/`cephfs-snapdir` 快照）
+- [x] 实现 [`internal/ext4`](../internal/ext4) 纯 Go 只读 `ext4` 解析器（含内存 jbd2 日志重放、extent/indirect、htree、`inline_data`、`trusted.*`/`user.*` xattr）并接入 [`internal/commit/ext4source.go`](../internal/commit/ext4source.go) 与 [`cmd/devpilot-commit`](../cmd/devpilot-commit/main.go)
+- [x] 实现在线 `FIFREEZE`/`FITHAW` 与 `loop.devpilot.wutz.dev` PV `Sync`→`Freeze` 自动提升（`--commit-freeze-timeout=30s`、[`devpilot-init --freeze/--thaw`](../internal/initroot/freeze_linux.go)、[`devboxcommit_freeze.go`](../internal/controller/devboxcommit_freeze.go)）
+- [x] 补齐 Helm Chart（`loopCSI.enabled` 默认 `false`）、`Dockerfile.loop-csi` 与多架构发布流水线支持
+- [x] 单元测试与容器化真实内核 E2E 验证：`make lint-fix && make test`、`GOOS=linux go vet/build`、`make helm-lint` 与 [`hack/loop-csi-e2e.sh`](../hack/loop-csi-e2e.sh) 全数通过
+- [ ] 待完成：在真实 IBM Storage Scale / VAST Data NFS / CephFS 多节点集群与真实 Kubernetes Kubelet 环境下执行 PoC 验收（OFD 锁断网释放、Direct I/O 实测、大规模热拷贝 freeze 窗口评估、`ExecFreezer` 联调）
+

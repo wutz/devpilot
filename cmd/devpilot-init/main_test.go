@@ -110,3 +110,47 @@ func TestRunHoldWaitsUntilCancelled(t *testing.T) {
 		t.Errorf("stderr = %q, want Released sentinel hold", out)
 	}
 }
+
+func TestRunRejectsFreezeAndThawTogether(t *testing.T) {
+	code, out := captureStderr(t, []string{"--freeze", "--thaw"})
+	if code != 1 {
+		t.Errorf("run() = %d, want 1", code)
+	}
+	if !strings.Contains(out, "mutually exclusive") {
+		t.Errorf("stderr = %q, want the conflict error", out)
+	}
+}
+
+// Outside a DevBox there is no devpilot-init PID 1 holding the root disk, so
+// the helper must refuse without ever announcing a freeze.
+func TestRunFreezeWithoutRootDiskNeverFreezes(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout strings.Builder
+	code := runIO([]string{"--freeze", "--freeze-timeout=1s"}, strings.NewReader(""), &stdout, w)
+	_ = w.Close()
+	stderr, _ := io.ReadAll(r)
+	_ = r.Close()
+
+	if code != 2 {
+		t.Errorf("run(--freeze) = %d, want 2; stderr: %s", code, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing without a freeze", stdout.String())
+	}
+	if !strings.Contains(string(stderr), "root disk") {
+		t.Errorf("stderr = %q, want the lookup error", stderr)
+	}
+}
+
+func TestRunThawWithoutRootDiskFails(t *testing.T) {
+	code, out := captureStderr(t, []string{"--thaw"})
+	if code != 1 {
+		t.Errorf("run(--thaw) = %d, want 1", code)
+	}
+	if !strings.Contains(out, "Could not thaw") {
+		t.Errorf("stderr = %q, want the thaw error", out)
+	}
+}

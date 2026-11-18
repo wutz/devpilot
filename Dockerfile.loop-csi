@@ -1,0 +1,27 @@
+# Build the devpilot-loop-csi driver (controller and node plugin).
+# Override BASE_IMAGE to build from another registry, e.g. docker.io/library/golang:1.26
+ARG BASE_IMAGE=golang:1.26
+FROM ${BASE_IMAGE} AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+	go build -a -trimpath -ldflags="-s -w" -o devpilot-loop-csi ./cmd/devpilot-loop-csi
+
+# Unlike the other images this one needs userland tools: mkfs.ext4, e2fsck
+# and resize2fs from e2fsprogs. Bookworm ships e2fsprogs 1.47, which knows the
+# orphan_file feature the driver turns off so that older host kernels can
+# mount the images it creates.
+FROM debian:bookworm-slim
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends e2fsprogs \
+	&& rm -rf /var/lib/apt/lists/*
+COPY --from=builder /workspace/devpilot-loop-csi /devpilot-loop-csi
+ENTRYPOINT ["/devpilot-loop-csi"]

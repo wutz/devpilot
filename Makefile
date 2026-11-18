@@ -4,6 +4,8 @@ IMG ?= controller:latest
 IMG_INIT ?= devpilot-init:latest
 # IMG_COMMIT is the streaming image builder the DevBoxCommit reconciler runs.
 IMG_COMMIT ?= devpilot-commit:latest
+# IMG_LOOP_CSI is the optional CSI driver for root disks on shared filesystems.
+IMG_LOOP_CSI ?= devpilot-loop-csi:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -153,6 +155,22 @@ docker-build-commit: ## Build the devpilot-commit image (IMG_COMMIT).
 .PHONY: docker-push-commit
 docker-push-commit: ## Push the devpilot-commit image.
 	$(CONTAINER_TOOL) push ${IMG_COMMIT}
+
+.PHONY: build-loop-csi
+build-loop-csi: ## Build the static devpilot-loop-csi binary for Linux.
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags="-s -w" -o bin/devpilot-loop-csi ./cmd/devpilot-loop-csi
+
+.PHONY: docker-build-loop-csi
+docker-build-loop-csi: ## Build the devpilot-loop-csi image (IMG_LOOP_CSI).
+	$(CONTAINER_TOOL) build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -f Dockerfile.loop-csi -t ${IMG_LOOP_CSI} .
+
+.PHONY: docker-push-loop-csi
+docker-push-loop-csi: ## Push the devpilot-loop-csi image.
+	$(CONTAINER_TOOL) push ${IMG_LOOP_CSI}
+
+.PHONY: test-loop-e2e
+test-loop-e2e: ## Run the loop CSI tests that need a real kernel, in a privileged Docker container.
+	./hack/loop-csi-e2e.sh
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

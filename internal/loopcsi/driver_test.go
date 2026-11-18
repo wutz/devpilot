@@ -290,7 +290,7 @@ func (e *env) create(name string, size int64, src *csi.VolumeContentSource) (*cs
 		Name:                name,
 		CapacityRange:       &csi.CapacityRange{RequiredBytes: size},
 		VolumeCapabilities:  []*csi.VolumeCapability{rwCap},
-		Parameters:          map[string]string{"pool": testPoolShared},
+		Parameters:          map[string]string{ParamPool: testPoolShared},
 		VolumeContentSource: src,
 	})
 	if err != nil {

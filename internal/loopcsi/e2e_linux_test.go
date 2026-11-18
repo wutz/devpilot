@@ -40,6 +40,12 @@ import (
 	"github.com/wutz/devpilot/internal/loopdev"
 )
 
+const (
+	testPoolE2E  = "e2e"
+	e2eBasePin   = `{"imageRef":"example.com/base:v1","imageDigest":"sha256:abcd"}`
+	e2eHelloBody = "from node-a\n"
+)
+
 // TestE2ERealKernel drives the controller and two node servers against real
 // loop devices, ext4 and e2fsprogs. It needs root, /dev/loop-control and a
 // pool directory on a filesystem with O_DIRECT and hole punching (ext4 or
@@ -61,7 +67,7 @@ func TestE2ERealKernel(t *testing.T) {
 	if err := os.MkdirAll(poolDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pools, _ := NewPools([]Pool{{Name: "e2e", Path: poolDir}})
+	pools, _ := NewPools([]Pool{{Name: testPoolE2E, Path: poolDir}})
 	log := testr.New(t)
 	ctrl := &ControllerServer{Pools: pools, Log: log}
 	newNode := func(name string) *NodeServer {
@@ -73,15 +79,47 @@ func TestE2ERealKernel(t *testing.T) {
 	}
 	a, b := newNode("node-a"), newNode("node-b")
 
+	vol, img, ta := e2eCreateAndMount(ctx, t, ctrl, a, pools[testPoolE2E])
+	big := e2ePopulateVolume(t, ta)
+
+	// Guard 1: the OFD lock held by the loop device.
+	tb := filepath.Join(t.TempDir(), "b")
+	wantCode(t, publish(b, vol, tb, false), codes.FailedPrecondition, "second writer")
+	wantCode(t, publish(b, vol, tb, true), codes.FailedPrecondition, "raw reader while mounted")
+
+	// Guard 3: MMP stops a mount that bypasses the lock and the lease.
+	e2eTestMMPGuard(t, img)
+
+	// Online expansion.
+	e2eTestExpand(ctx, t, ctrl, a, vol.GetVolumeId(), ta)
+
+	// Online snapshot under a freeze, restore, and read raw via ext4 + commit.WriteLayer.
+	restoredID, snapID := e2eTestSnapshotRestoreAndCommit(ctx, t, ctrl, b, pools[testPoolE2E], vol.GetVolumeId(), ta)
+
+	// Trim on unpublish and takeover on node-b.
+	e2eTestTrimAndTakeover(t, a, b, vol, img, ta, tb, big)
+
+	for _, id := range []string{vol.GetVolumeId(), restoredID} {
+		if _, err := ctrl.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ctrl.DeleteSnapshot(ctx, &csi.DeleteSnapshotRequest{SnapshotId: snapID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func e2eCreateAndMount(ctx context.Context, t *testing.T, ctrl *ControllerServer, node *NodeServer, pool Pool) (*csi.Volume, string, string) {
+	t.Helper()
 	resp, err := ctrl.CreateVolume(ctx, &csi.CreateVolumeRequest{
 		Name: "pvc-e2e", VolumeCapabilities: []*csi.VolumeCapability{rwCap},
-		CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 30}, Parameters: map[string]string{"pool": "e2e"},
+		CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 30}, Parameters: map[string]string{ParamPool: testPoolE2E},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	vol := resp.GetVolume()
-	img := imagePath(pools["e2e"], "pvc-e2e")
+	img := imagePath(pool, "pvc-e2e")
 	sb, err := readSuperblock(img)
 	if err != nil || !sb.MMP || sb.Size() != 1<<30 {
 		t.Fatalf("created image superblock = %+v, %v", sb, err)
@@ -91,7 +129,7 @@ func TestE2ERealKernel(t *testing.T) {
 	t.Logf("fresh 1GiB image allocates %d KiB", st.Blocks/2)
 
 	ta := filepath.Join(t.TempDir(), "a")
-	if err := publish(a, vol, ta, false); err != nil {
+	if err := publish(node, vol, ta, false); err != nil {
 		t.Fatal(err)
 	}
 	loops, err := loopdev.FindByBackingFile(img)
@@ -101,7 +139,12 @@ func TestE2ERealKernel(t *testing.T) {
 	if !loops[0].DirectIO {
 		t.Fatalf("loop device %s is buffered", loops[0].Path)
 	}
-	if err := os.WriteFile(filepath.Join(ta, "hello"), []byte("from node-a\n"), 0o644); err != nil {
+	return vol, img, ta
+}
+
+func e2ePopulateVolume(t *testing.T, ta string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(ta, "hello"), []byte(e2eHelloBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(ta, "upper", "app"), 0o755); err != nil {
@@ -110,7 +153,7 @@ func TestE2ERealKernel(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ta, "upper", "app", "run.sh"), []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mknod(filepath.Join(ta, "upper", "app", "wh"), syscall.S_IFCHR|0o000, 0); err != nil {
+	if err := syscall.Mknod(filepath.Join(ta, "upper", "app", "wh"), syscall.S_IFCHR, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(ta, "upper", "replaced"), 0o755); err != nil {
@@ -122,21 +165,18 @@ func TestE2ERealKernel(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(ta, ".meta"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	const basePin = `{"imageRef":"example.com/base:v1","imageDigest":"sha256:abcd"}`
-	if err := os.WriteFile(filepath.Join(ta, ".meta", "base-image.json"), []byte(basePin), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(ta, ".meta", "base-image.json"), []byte(e2eBasePin), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	big := filepath.Join(ta, "big")
 	if err := os.WriteFile(big, make1(64<<20), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return big
+}
 
-	// Guard 1: the OFD lock held by the loop device.
-	tb := filepath.Join(t.TempDir(), "b")
-	wantCode(t, publish(b, vol, tb, false), codes.FailedPrecondition, "second writer")
-	wantCode(t, publish(b, vol, tb, true), codes.FailedPrecondition, "raw reader while mounted")
-
-	// Guard 3: MMP stops a mount that bypasses the lock and the lease.
+func e2eTestMMPGuard(t *testing.T, img string) {
+	t.Helper()
 	t.Run("MMP", func(t *testing.T) {
 		dev, h, err := loopdev.Attach(img, loopdev.Options{DirectIO: loopdev.DirectIOOff})
 		if err != nil {
@@ -153,43 +193,48 @@ func TestE2ERealKernel(t *testing.T) {
 		}
 		t.Logf("second mount refused after %s: %v", time.Since(start).Round(time.Second), err)
 	})
+}
 
-	// Online expansion.
+func e2eTestExpand(ctx context.Context, t *testing.T, ctrl *ControllerServer, node *NodeServer, volID, target string) {
+	t.Helper()
 	if _, err := ctrl.ControllerExpandVolume(ctx, &csi.ControllerExpandVolumeRequest{
-		VolumeId: vol.GetVolumeId(), CapacityRange: &csi.CapacityRange{RequiredBytes: 2 << 30}}); err != nil {
+		VolumeId: volID, CapacityRange: &csi.CapacityRange{RequiredBytes: 2 << 30}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.NodeExpandVolume(ctx, &csi.NodeExpandVolumeRequest{VolumeId: vol.GetVolumeId(), VolumePath: ta}); err != nil {
+	if _, err := node.NodeExpandVolume(ctx, &csi.NodeExpandVolumeRequest{VolumeId: volID, VolumePath: target}); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := a.NodeGetVolumeStats(ctx, &csi.NodeGetVolumeStatsRequest{VolumeId: vol.GetVolumeId(), VolumePath: ta})
+	stats, err := node.NodeGetVolumeStats(ctx, &csi.NodeGetVolumeStatsRequest{VolumeId: volID, VolumePath: target})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if total := stats.GetUsage()[0].GetTotal(); total < 1900<<20 {
 		t.Fatalf("filesystem is %d bytes after expanding to 2GiB", total)
 	}
+}
 
+func e2eTestSnapshotRestoreAndCommit(ctx context.Context, t *testing.T, ctrl *ControllerServer, node *NodeServer, pool Pool, volID, ta string) (string, string) {
+	t.Helper()
 	// Online snapshot under a freeze, as the DevPilot controller does it.
 	if err := loopdev.Freeze(ta); err != nil {
 		t.Fatal(err)
 	}
 	snap, err := ctrl.CreateSnapshot(ctx, &csi.CreateSnapshotRequest{
-		Name: "snapshot-e2e", SourceVolumeId: vol.GetVolumeId(), Parameters: map[string]string{"allowLiveCopy": "true"}})
+		Name: "snapshot-e2e", SourceVolumeId: volID, Parameters: map[string]string{"allowLiveCopy": "true"}})
 	if thawErr := loopdev.Thaw(ta); thawErr != nil {
 		t.Fatal(thawErr)
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapImg := snapshotImagePath(pools["e2e"], SnapshotID{Pool: "e2e", Kind: SnapshotFile, Name: "snapshot-e2e"})
+	snapImg := snapshotImagePath(pool, SnapshotID{Pool: testPoolE2E, Kind: SnapshotFile, Name: "snapshot-e2e"})
 	if ssb, err := readSuperblock(snapImg); err != nil || ssb.NeedsRecovery {
 		t.Fatalf("frozen snapshot superblock = %+v, %v (a frozen ext4 has a clean journal)", ssb, err)
 	}
 
 	// Restore and read it raw, the way a commit Job does.
 	rresp, err := ctrl.CreateVolume(ctx, &csi.CreateVolumeRequest{
-		Name: "pvc-restored", VolumeCapabilities: []*csi.VolumeCapability{rwCap}, Parameters: map[string]string{"pool": "e2e"},
+		Name: "pvc-restored", VolumeCapabilities: []*csi.VolumeCapability{rwCap}, Parameters: map[string]string{ParamPool: testPoolE2E},
 		CapacityRange: &csi.CapacityRange{RequiredBytes: 2 << 30},
 		VolumeContentSource: &csi.VolumeContentSource{Type: &csi.VolumeContentSource_Snapshot{
 			Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: snap.GetSnapshot().GetSnapshotId()}}},
@@ -199,39 +244,48 @@ func TestE2ERealKernel(t *testing.T) {
 	}
 	restored := rresp.GetVolume()
 	traw := filepath.Join(t.TempDir(), "raw")
-	if err := publish(b, restored, traw, true); err != nil {
+	if err := publish(node, restored, traw, true); err != nil {
 		t.Fatal(err)
 	}
 	rawDiskPath := filepath.Join(traw, ImageName)
 	out, err := exec.Command("debugfs", "-R", "cat /hello", rawDiskPath).Output()
-	if err != nil || string(out) != "from node-a\n" {
+	if err != nil || string(out) != e2eHelloBody {
 		t.Fatalf("debugfs cat /hello from the raw restored image = %q, %v", out, err)
 	}
+	verifyE2ELayer(t, rawDiskPath)
+	if err := os.WriteFile(filepath.Join(traw, "x"), nil, 0o644); err == nil {
+		t.Fatal("raw publish is writable")
+	}
+	if err := unpublish(node, restored, traw); err != nil {
+		t.Fatal(err)
+	}
+	return restored.GetVolumeId(), snap.GetSnapshot().GetSnapshotId()
+}
+
+func verifyE2ELayer(t *testing.T, rawDiskPath string) {
+	t.Helper()
 	// Verify pure-Go ext4 reader + commit.Ext4Source on the raw snapshot clone.
 	extImg, err := ext4.OpenFile(rawDiskPath)
 	if err != nil {
 		t.Fatalf("ext4.OpenFile(%s): %v", rawDiskPath, err)
 	}
+	defer func() { _ = extImg.Close() }()
 	pinIno, err := extImg.Lookup(".meta/base-image.json")
 	if err != nil {
-		_ = extImg.Close()
 		t.Fatalf("ext4 lookup .meta/base-image.json: %v", err)
 	}
 	pinSR, err := extImg.OpenSection(pinIno)
 	if err != nil {
-		_ = extImg.Close()
 		t.Fatal(err)
 	}
 	pinData, err := io.ReadAll(pinSR)
-	if err != nil || string(pinData) != basePin {
-		_ = extImg.Close()
+	if err != nil || string(pinData) != e2eBasePin {
 		t.Fatalf("base-image.json = %q, %v", pinData, err)
 	}
 	var layerBuf bytes.Buffer
 	layerStats, err := commit.WriteLayer(&layerBuf, commit.Options{
 		Source: &commit.Ext4Source{Img: extImg, Root: "upper"},
 	})
-	_ = extImg.Close()
 	if err != nil {
 		t.Fatalf("commit.WriteLayer over Ext4Source: %v", err)
 	}
@@ -260,18 +314,16 @@ func TestE2ERealKernel(t *testing.T) {
 	if layerStats.Whiteouts != 1 || layerStats.OpaqueDirs != 1 || layerStats.Files != 1 {
 		t.Fatalf("unexpected E2E layer stats: %+v", layerStats)
 	}
-	if err := os.WriteFile(filepath.Join(traw, "x"), nil, 0o644); err == nil {
-		t.Fatal("raw publish is writable")
-	}
-	if err := unpublish(b, restored, traw); err != nil {
-		t.Fatal(err)
-	}
+}
 
+func e2eTestTrimAndTakeover(t *testing.T, a, b *NodeServer, vol *csi.Volume, img, ta, tb, big string) {
+	t.Helper()
 	// Trim on unpublish gives freed blocks back to the pool.
 	if err := os.Remove(big); err != nil {
 		t.Fatal(err)
 	}
 	syscall.Sync()
+	var st syscall.Stat_t
 	_ = syscall.Stat(img, &st)
 	before := st.Blocks / 2
 	if err := unpublish(a, vol, ta); err != nil {
@@ -293,18 +345,10 @@ func TestE2ERealKernel(t *testing.T) {
 	if err := publish(b, vol, tb, false); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := os.ReadFile(filepath.Join(tb, "hello")); err != nil || string(got) != "from node-a\n" {
+	if got, err := os.ReadFile(filepath.Join(tb, "hello")); err != nil || string(got) != e2eHelloBody {
 		t.Fatalf("node-b read %q, %v", got, err)
 	}
 	if err := unpublish(b, vol, tb); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{vol.GetVolumeId(), restored.GetVolumeId()} {
-		if _, err := ctrl.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := ctrl.DeleteSnapshot(ctx, &csi.DeleteSnapshotRequest{SnapshotId: snap.GetSnapshot().GetSnapshotId()}); err != nil {
 		t.Fatal(err)
 	}
 }

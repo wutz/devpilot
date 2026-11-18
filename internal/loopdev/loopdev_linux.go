@@ -186,7 +186,7 @@ func configure(dev, backing *os.File, opts Options, dio bool) error {
 	setFileName(&cfg.Info, backing.Name())
 
 	err := unix.IoctlLoopConfigure(int(dev.Fd()), cfg)
-	if err == nil || !(errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTTY)) {
+	if err == nil || (!errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOTTY)) {
 		return err
 	}
 	// Kernels before 5.8 have no LOOP_CONFIGURE.
@@ -311,7 +311,7 @@ func FindByBackingFile(path string) ([]Device, error) {
 		if err != nil {
 			continue
 		}
-		if info.Device != uint64(st.Dev) || info.Inode != st.Ino {
+		if info.Device != st.Dev || info.Inode != st.Ino {
 			continue
 		}
 		out = append(out, Device{

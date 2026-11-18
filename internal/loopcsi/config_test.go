@@ -106,7 +106,7 @@ func TestRoundSize(t *testing.T) {
 func TestParseParams(t *testing.T) {
 	const testPool = "vast"
 	p, err := ParseVolumeParams(map[string]string{
-		"pool": testPool, "directIO": "preferred", "trimOnUnmount": "false", "trimMinLength": "65536", "mmp": "false",
+		ParamPool: testPool, "directIO": "preferred", "trimOnUnmount": "false", "trimMinLength": "65536", "mmp": "false",
 		"csi.storage.k8s.io/pv/name": "pvc-1",
 		// external-provisioner writes this into the PV's volumeAttributes and
 		// kubelet passes it to NodePublishVolume in the volume context.

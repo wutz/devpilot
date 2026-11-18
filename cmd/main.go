@@ -42,7 +42,6 @@ import (
 	devpilotv1alpha1 "github.com/wutz/devpilot/api/v1alpha1"
 
 	"github.com/wutz/devpilot/internal/controller"
-	"github.com/wutz/devpilot/internal/dashboard"
 	webhookv1alpha1 "github.com/wutz/devpilot/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -83,8 +82,6 @@ func main() {
 	var ingressPort int
 	var retentionReclaim string
 	var buildNamespaceSuffix string
-	var dashboardAddr string
-	var dashboardTokenCommand string
 	var prewarmNamespace string
 	var prepullThreshold string
 	var commitFreezeTimeout time.Duration
@@ -134,13 +131,6 @@ func main() {
 	flag.StringVar(&prepullThreshold, "prepull-threshold", controller.DefaultPrepullThreshold,
 		"Minimum base image manifest size that triggers automatic two-phase GPU-free pre-pulling "+
 			"(e.g. 20Gi). Set to 0 to disable automatic pre-pulling.")
-	flag.StringVar(&dashboardAddr, "dashboard-bind-address", "",
-		"Address the optional web console listens on, e.g. :8082. Every request acts "+
-			"with the bearer token it carries, so the console is never more powerful than its caller. "+
-			"Empty disables it.")
-	flag.StringVar(&dashboardTokenCommand, "dashboard-token-command", "",
-		"Command the web console suggests for fetching a bearer token; {namespace} stands for the "+
-			"namespace in view, e.g. a login helper for OIDC users. Empty suggests a ServiceAccount token.")
 	flag.DurationVar(&commitFreezeTimeout, "commit-freeze-timeout", controller.DefaultCommitFreezeTimeout,
 		"Longest time an online commit keeps a running DevBox's root disk frozen while the CSI driver cuts "+
 			"the snapshot (consistency Freeze, and Sync on loop-backed root disks). A snapshot not cut in "+
@@ -306,16 +296,6 @@ func main() {
 			setupLog.Error(err, "Failed to create webhook", "webhook", "DevBox")
 			os.Exit(1)
 		}
-	}
-	if dashboardAddr != "" {
-		console := dashboard.New(scheme, mgr.GetConfig(),
-			ctrl.Log.WithName("dashboard"))
-		console.TokenCommand = dashboardTokenCommand
-		if err := mgr.Add(dashboard.NewRunnable(console, dashboardAddr)); err != nil {
-			setupLog.Error(err, "Failed to create the web console")
-			os.Exit(1)
-		}
-		setupLog.Info("Serving the web console", "address", dashboardAddr)
 	}
 	if err := (&controller.ImagePrewarmReconciler{
 		Client: mgr.GetClient(),

@@ -54,8 +54,7 @@
 │  devpilot-controller-manager (Deployment, 2 replicas, leader election)                  │
 │   ├─ DevBoxReconciler      协调 Pod、rootdisk PVC、Service、SSHRoute、HTTPRoute、计费段 │
 │   ├─ DevBoxCommitReconciler 协调 VolumeSnapshot、克隆 PVC、隔离 Commit Job、可选 Rebase │
-│   ├─ WebhookServer         准入校验与默认值填充（镜像摘要解析、规格合法性、不可变字段） │
-│   └─ DashboardServer       轻量看板（实例状态、开关机、保存镜像操作入口，可选开启）     │
+│   └─ WebhookServer         准入校验与默认值填充（镜像摘要解析、规格合法性、不可变字段） │
 └──────────────────┬───────────────────────────────────────────────────┬──────────────────┘
                    │                                                   │
                    ▼                                                   ▼
@@ -76,7 +75,7 @@
 
 | 二进制 / 镜像 | 构建来源 | 职责 |
 | --- | --- | --- |
-| `devpilot-manager` | `cmd/manager` | Operator 控制器、Webhook 与可选看板，发布为 `ghcr.io/wutz/devpilot:<ver>` |
+| `devpilot-manager` | `cmd/manager` | Operator 控制器与 Webhook，发布为 `ghcr.io/wutz/devpilot:<ver>` |
 | `devpilot-init` | `cmd/devpilot-init`（`CGO_ENABLED=0` 静态编译） | 注入到用户开发机 Pod 内执行 OverlayFS 挂载、NVIDIA/PVC 子挂载迁移、`pivot_root` 及进程托管，零动态库依赖（兼容 Ubuntu/CentOS/Alpine 任意基础镜像） |
 | `devpilot-commit` | `cmd/devpilot-commit` | 在非特权 Commit Job 中读取 `upper/`、转换 whiteout/opaque、通过 `go-containerregistry` 远端追加层推送到镜像仓库 |
 

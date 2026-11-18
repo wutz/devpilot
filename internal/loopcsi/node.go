@@ -412,6 +412,17 @@ func (n *NodeServer) publishReadWrite(ctx context.Context, id VolumeID, pool Poo
 	// Guard 1: an OFD write lock on the very descriptor the loop device will
 	// hold, so the lock lives exactly as long as the device is bound.
 	f, err := n.Host.OpenBacking(img, false, params.DirectIO != loopdev.DirectIOOff)
+	if errors.Is(err, loopdev.ErrGPFSDirectIOUnsafe) {
+		if params.DirectIO == loopdev.DirectIOPreferred {
+			n.Log.Info("GPFS backing detected; falling back from O_DIRECT to buffered loop I/O (only safe on kernels unaffected by IBM APAR IJ60020)",
+				"volumeID", id.String(), "image", img)
+			params.DirectIO = loopdev.DirectIOOff
+			f, err = n.Host.OpenBacking(img, false, false)
+		} else {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"volume %s: %v; set the StorageClass parameter directIO=off (or preferred on kernels unaffected by IBM APAR IJ60020)", id, err)
+		}
+	}
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -463,6 +474,10 @@ func (n *NodeServer) publishReadWrite(ctx context.Context, id VolumeID, pool Poo
 
 	dev, devHandle, err := n.Host.Attach(f, loopdev.Options{DirectIO: params.DirectIO})
 	if err != nil {
+		if errors.Is(err, loopdev.ErrGPFSDirectIOUnsafe) {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"volume %s: %v; set the StorageClass parameter directIO=off (or preferred on kernels unaffected by IBM APAR IJ60020)", id, err)
+		}
 		if errors.Is(err, loopdev.ErrDirectIOUnavailable) {
 			return nil, status.Errorf(codes.FailedPrecondition,
 				"volume %s: %v; set the StorageClass parameter directIO=preferred to accept buffered I/O", id, err)

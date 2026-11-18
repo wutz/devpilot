@@ -32,6 +32,7 @@
 #   POOL_NAME        pool name used in the StorageClass (default: shared)
 #   POOL_DIR         pool directory on the shared filesystem (default: /mnt/devpilot-loop-pool)
 #   SC_NAME          StorageClass to create (default: loop-verify-$POOL_NAME)
+#   DIRECT_IO        directIO parameter for StorageClass (default: required)
 #   NS               namespace for the test resources (default: devpilot-loop-verify)
 #   KEEP=1           keep everything on exit instead of cleaning up
 #   PULL_SECRET_SRC  <namespace>/<name> of an image pull secret to copy into NS (optional)
@@ -46,6 +47,7 @@ cd "$(dirname "$0")/.."
 POOL_NAME=${POOL_NAME:-shared}
 POOL_DIR=${POOL_DIR:-/mnt/devpilot-loop-pool}
 SC_NAME=${SC_NAME:-loop-verify-$POOL_NAME}
+DIRECT_IO=${DIRECT_IO:-required}
 NS=${NS:-devpilot-loop-verify}
 KEEP=${KEEP:-0}
 PULL_SECRET=${PULL_SECRET:-harbor-pull}
@@ -236,7 +238,7 @@ loopCSI:
   storageClasses:
     - name: $SC_NAME
       pool: $POOL_NAME
-      directIO: required
+      directIO: "$DIRECT_IO"
       trimOnUnmount: true
   snapshotClass:
     create: true

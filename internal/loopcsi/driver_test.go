@@ -42,13 +42,14 @@ import (
 // file reference does, and it is closed when its mount goes away
 // (autoclear).
 type fakeHost struct {
-	mu       sync.Mutex
-	next     int
-	loops    map[string]*fakeLoop // device path -> loop
-	mounts   map[string]string    // target -> source (device or dir)
-	readOnly map[string]bool
-	calls    []string
-	noDIO    bool
+	mu         sync.Mutex
+	next       int
+	loops      map[string]*fakeLoop // device path -> loop
+	mounts     map[string]string    // target -> source (device or dir)
+	readOnly   map[string]bool
+	calls      []string
+	noDIO      bool
+	gpfsUnsafe bool
 }
 
 type fakeLoop struct {
@@ -65,7 +66,11 @@ func (h *fakeHost) record(s string, args ...any) {
 	h.calls = append(h.calls, fmt.Sprintf(s, args...))
 }
 
-func (h *fakeHost) OpenBacking(path string, readOnly, _ bool) (*os.File, error) {
+func (h *fakeHost) OpenBacking(path string, readOnly, dio bool) (*os.File, error) {
+	h.record("open dio=%v", dio)
+	if h.gpfsUnsafe && dio {
+		return nil, fmt.Errorf("%s: %w", path, loopdev.ErrGPFSDirectIOUnsafe)
+	}
 	return loopdev.OpenBacking(path, readOnly, false)
 }
 
@@ -96,6 +101,9 @@ func (h *fakeHost) release(dev string) {
 func (h *fakeHost) Attach(f *os.File, opts loopdev.Options) (*loopdev.Device, io.Closer, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.gpfsUnsafe && opts.DirectIO != loopdev.DirectIOPreferred && opts.DirectIO != loopdev.DirectIOOff {
+		return nil, nil, fmt.Errorf("%s: %w: %w", f.Name(), loopdev.ErrDirectIOUnavailable, loopdev.ErrGPFSDirectIOUnsafe)
+	}
 	if h.noDIO && opts.DirectIO != loopdev.DirectIOPreferred && opts.DirectIO != loopdev.DirectIOOff {
 		return nil, nil, loopdev.ErrDirectIOUnavailable
 	}
@@ -107,7 +115,8 @@ func (h *fakeHost) Attach(f *os.File, opts loopdev.Options) (*loopdev.Device, io
 	h.next++
 	h.loops[dev] = &fakeLoop{image: f.Name(), file: os.NewFile(uintptr(fd), f.Name()), held: 1}
 	h.record("attach %s %s", dev, filepath.Base(filepath.Dir(f.Name())))
-	return &loopdev.Device{Path: dev, DirectIO: !h.noDIO, BackingFile: f.Name()}, loopHandle{h, dev}, nil
+	dio := !h.noDIO && !h.gpfsUnsafe && opts.DirectIO != loopdev.DirectIOOff
+	return &loopdev.Device{Path: dev, DirectIO: dio, BackingFile: f.Name()}, loopHandle{h, dev}, nil
 }
 
 func (h *fakeHost) FindLoops(image string) ([]loopdev.Device, error) {
@@ -469,6 +478,53 @@ func TestDirectIORequired(t *testing.T) {
 	vol.VolumeContext[ParamDirectIO] = string(loopdev.DirectIOPreferred)
 	if err := publish(a, vol, target, false); err != nil {
 		t.Fatalf("directIO=preferred: %v", err)
+	}
+}
+
+func TestGPFSDirectIOGuard(t *testing.T) {
+	e := newEnv(t)
+	vol, err := e.create("pvc-gpfs", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ha := e.node(testNodeA)
+	ha.gpfsUnsafe = true
+	target := filepath.Join(t.TempDir(), "a")
+
+	// directIO=required must be rejected with FailedPrecondition without touching lease/lock/attach.
+	wantCode(t, publish(a, vol, target, false), codes.FailedPrecondition, "GPFS with directIO=required")
+	if ha.has("attach") {
+		t.Errorf("directIO=required on GPFS attempted Attach: %v", ha.calls)
+	}
+	if l, _ := readLease(leasePath(e.pool, "pvc-gpfs")); l != nil {
+		t.Error("failed GPFS publish left a lease")
+	}
+	if held, _, _ := probeLock(imagePath(e.pool, "pvc-gpfs")); held {
+		t.Error("failed GPFS publish left the lock held")
+	}
+
+	// directIO=preferred falls back to buffered OpenBacking (dio=false).
+	vol.VolumeContext[ParamDirectIO] = string(loopdev.DirectIOPreferred)
+	if err := publish(a, vol, target, false); err != nil {
+		t.Fatalf("GPFS with directIO=preferred: %v", err)
+	}
+	if !ha.has("open dio=false") {
+		t.Errorf("GPFS fallback did not reopen with dio=false: %v", ha.calls)
+	}
+	if v := a.get(VolumeID{Pool: testPoolShared, Name: "pvc-gpfs"}); v == nil || v.DirectIO {
+		t.Errorf("GPFS preferred volume state = %+v, want DirectIO=false", v)
+	}
+	if err := unpublish(a, vol, target); err != nil {
+		t.Fatal(err)
+	}
+
+	// directIO=off opens directly without O_DIRECT.
+	vol.VolumeContext[ParamDirectIO] = string(loopdev.DirectIOOff)
+	if err := publish(a, vol, target, false); err != nil {
+		t.Fatalf("GPFS with directIO=off: %v", err)
+	}
+	if v := a.get(VolumeID{Pool: testPoolShared, Name: "pvc-gpfs"}); v == nil || v.DirectIO {
+		t.Errorf("GPFS directIO=off volume state = %+v, want DirectIO=false", v)
 	}
 }
 

@@ -331,7 +331,15 @@ reclaimPolicy: {{ .reclaimPolicy | default "Delete" }}
 volumeBindingMode: Immediate
 parameters:
   pool: {{ .pool | quote }}
-  directIO: {{ .directIO | default "required" | quote }}
+  {{- $dio := "required" }}
+  {{- if hasKey . "directIO" }}
+  {{- if eq (kindOf .directIO) "bool" }}
+  {{- $dio = ternary "required" "off" .directIO }}
+  {{- else if .directIO }}
+  {{- $dio = toString .directIO }}
+  {{- end }}
+  {{- end }}
+  directIO: {{ $dio | quote }}
   trimOnUnmount: {{ ternary "true" "false" (ne (toString .trimOnUnmount) "false") | quote }}
   {{- with .trimMinLength }}
   trimMinLength: {{ . | quote }}

@@ -68,6 +68,17 @@ func AttachFile(file *os.File, opts Options) (*Device, *os.File, error) {
 	wantDIO := opts.DirectIO != DirectIOOff
 	backing := file.Name()
 
+	if isGPFS, err := isGPFSFile(file); err == nil && isGPFS {
+		hasODirect, flagErr := hasODirectFlag(file)
+		if flagErr != nil {
+			return nil, nil, fmt.Errorf("%s: inspect file flags: %w", backing, flagErr)
+		}
+		if err := validateGPFSDirectIOMode(hasODirect, opts.DirectIO); err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", backing, err)
+		}
+		wantDIO = false
+	}
+
 	var lastErr error
 	for range attachRetries {
 		num, err := getFree()
@@ -114,13 +125,17 @@ func AttachFile(file *os.File, opts Options) (*Device, *os.File, error) {
 // how current kernels (and losetup --direct-io) request direct I/O;
 // filesystems that reject O_DIRECT at open time get a buffered descriptor and
 // rely on LO_FLAGS_DIRECT_IO alone, whose effect is verified after
-// configuration.
+// configuration. On IBM Storage Scale (GPFS), opening a loop backing file
+// with O_DIRECT triggers a kernel panic in mmfs26, so dio=true is refused.
 func OpenBacking(path string, readOnly, dio bool) (*os.File, error) {
 	flags := unix.O_RDWR | unix.O_CLOEXEC
 	if readOnly {
 		flags = unix.O_RDONLY | unix.O_CLOEXEC
 	}
 	if dio {
+		if isGPFS, err := isGPFSPath(path); err == nil && isGPFS {
+			return nil, fmt.Errorf("%s: %w", path, ErrGPFSDirectIOUnsafe)
+		}
 		f, err := os.OpenFile(path, flags|unix.O_DIRECT, 0)
 		if err == nil {
 			return f, nil
@@ -134,6 +149,30 @@ func OpenBacking(path string, readOnly, dio bool) (*os.File, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	return f, nil
+}
+
+func isGPFSPath(path string) (bool, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return false, err
+	}
+	return int64(st.Type) == GPFSSuperMagic, nil //nolint:unconvert // Type width differs across Linux architectures.
+}
+
+func isGPFSFile(f *os.File) (bool, error) {
+	var st unix.Statfs_t
+	if err := unix.Fstatfs(int(f.Fd()), &st); err != nil {
+		return false, err
+	}
+	return int64(st.Type) == GPFSSuperMagic, nil //nolint:unconvert // Type width differs across Linux architectures.
+}
+
+func hasODirectFlag(f *os.File) (bool, error) {
+	flags, err := unix.FcntlInt(f.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		return false, err
+	}
+	return flags&unix.O_DIRECT != 0, nil
 }
 
 func getFree() (int, error) {

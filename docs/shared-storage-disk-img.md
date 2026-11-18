@@ -43,7 +43,7 @@
 | **真实集群 + VAST NFSv3 池（2 个 GPU 节点）** | **已通过（12/12）** | 用 [`hack/loop-csi-cluster-verify.sh`](../hack/loop-csi-cluster-verify.sh) 在开发集群的两个 GPU 节点上部署驱动，池目录是两节点共同挂载的 VAST NFSv3 子目录（`vers=3,nconnect=16,hard`，脚本会校验两节点挂载源一致并跨节点读回标记文件，否则拒绝运行）。通过项：创建稀疏 `disk.img`、挂载并写入 256 MiB 与 500 个小文件、在线扩容 2Gi → 4Gi、第二节点挂载被驱动以 `FailedPrecondition ... is in use` 拒绝、快照后恢复内容摘要一致、卸载后跨节点接管内容摘要一致。 |
 | **同一次验证中的未覆盖项** | **未验证** | 未测：节点断网后的租约驱逐、网络抖动下 `hard` 挂载的行为、吞吐与延迟（本次只做功能验证，没有性能数据）、`DevBoxCommit` 的 `ExecFreezer` 全链路、`FICLONE`。T4 只证明第二写者被拒，没有区分是 OFD 锁、租约还是 MMP 起的作用。 |
 | **卸载后 `FITRIM` 回收（VAST NFSv3）** | **未回收** | 卸载前后 `disk.img` 实际占用同为 308994048 字节（文件大小 4294967296），NFSv3 池上空间不会随 `FITRIM` 归还。容量规划要按高水位计。 |
-| **GPFS 池** | **阻塞，未解决** | 在 GPFS（`/fs1`，IBM Storage Scale 5.2.3，内核 5.15.0-94）上通过驱动发布卷时，两个不同节点各出现一次整机冻结，约 3.5 分钟后由硬件看门狗恢复。冻结前租约临时文件已写完整但未 `rename`，内核日志中没有 `loop:` 或 `EXT4-fs` 记录。手工在同一节点与文件系统上重放同样的系统调用从未挂起，触发条件与驱动进程上下文有关，尚未定位。在根因查明前不要在 GPFS 上发布 loop 卷。 |
+| **GPFS 池** | **阻塞，已定位到 GPFS 内核模块缺陷** | 在 GPFS（`/fs1`，IBM Storage Scale 5.2.3.5，内核 5.15.0-94）上通过驱动发布卷时，两个不同节点各出现一次整机重启。根因来自两个节点 `/var/lib/systemd/pstore/` 里 ERST 保存的崩溃记录：`mmfs26` 模块中 `dioRdWr` 在 `retrieveDAandVerifyAligned` 处发生空指针解引用（`BUG: kernel NULL pointer dereference, address: 0000000000000000`），调用栈为 `loop_workfn` → `lo_rw_aio` → `gpfs_f_read_iter` → `gpfsRead` → `dioRdWr`。节点上 `kernel.panic_on_oops=1`、`kernel.panic=10`，因此直接 `Kernel panic - not syncing: Fatal exception` 后重启，约 3.5 分钟是整机重启加 GPFS 重新加入的时间，并非看门狗。最初"整机冻结、无内核日志"的判断是因为 journald 来不及落盘。崩溃发生在 loop 工作线程对 GPFS 文件发起 direct I/O 读时，与驱动代码、租约写入无关。尚未验证具体触发的镜像区域（推测与稀疏镜像上未分配块的 direct 读有关），也未验证关闭 direct I/O 是否绕开该缺陷。在 IBM 给出修复前不要在 GPFS 上发布 loop 卷。 |
 | **CephFS 池** | **未验证** | 开发集群的 StorageClass 中只有 Ceph RBD，没有 CephFS，本次没有测 CephFS；`.snap` 快照策略仅有单元测试。 |
 | **服务端协议策略** | **已确认** | 该 VAST 服务端拒绝 NFSv4.x，只能使用 NFSv3；NFSv3 下 `O_DIRECT` 的 loop 挂载与跨节点 OFD 锁拒绝已在上面的 12 项中实测可用。 |
 
@@ -96,6 +96,7 @@
 
 - 公开资料记录 Linux `6.15+` 及部分合入缓冲 loop `vfs_iter` 变更的发行版内核与特定版本 IBM Storage Scale 客户端组合下，缓冲模式 loop 设备存在数据损坏风险（IBM APAR `IJ60020`，**需在目标 GPFS 集群实际核对客户端与内核版本并验证**）。
 - 本实现通过默认强制 `directIO: required`（绕过缓冲路径）并在 PoC 清单中要求先行校验 `DirectIO=true` 与客户端版本来规避该风险。
+- **实测发现的另一缺陷**：在 Storage Scale 5.2.3.5 + 内核 5.15.0-94 上，direct I/O 模式的 loop 读 GPFS 文件会使 `mmfs26` 的 `dioRdWr` 空指针崩溃并导致整机 panic（见第 2 节 GPFS 行）。因此 direct I/O 在该组合上并不安全，需要先向 IBM 提交崩溃栈并换用已修复的版本，之后才能把 GPFS 当作池后端。该缺陷不会以 `ErrDirectIOUnavailable` 之类的错误返回，驱动无法在运行时防御，只能靠部署前的版本核对。
 
 ### 4.4 风险四：存储网络瞬断与 `ext4` 错误修复
 

@@ -38,12 +38,13 @@
 | --- | --- | --- |
 | **Go 静态检查与单元测试（含 `-race`）** | **已通过** | `make lint-fix`（`golangci-lint` 0 告警）、`make test` 全量通过：`internal/ext4`（`clean`/`legacy`/`features`/`tiny`/`dirty`/`dirty-legacy` 夹具、内存 jbd2 重放及 fuzz 种子）、`internal/commit`（`Ext4Source` 单元测试）、`cmd/devpilot-commit`、`internal/loopcsi`（CSI Controller/Node/租约/快照单测）、`internal/initroot`（freeze/thaw 单测）、`internal/controller`（envtest 下 Sync→Freeze 自动提升、Freeze 超时/异常删除快照等）。 |
 | **Linux 交叉编译与 `vet`** | **已通过** | `GOOS=linux go vet ./...` 与 `GOOS=linux go build ./...` 全量通过（涵盖所有 `//go:build linux` 系统调用代码）。 |
-| **真实 Linux 内核 Loop E2E** | **已通过** | 通过 [`hack/loop-csi-e2e.sh`](../hack/loop-csi-e2e.sh) 在特权容器内以 Docker 宿主机 `ext4` 后端盘运行 [`TestE2ERealKernel`](../internal/loopcsi/e2e_linux_test.go) 与 [`TestLinuxAttach`](../internal/loopdev/loopdev_linux_test.go)：实测真实 `/dev/loop*` 绑定、`DirectIO=true` 回读校验、OFD 写锁拒绝第二写者与 `raw` 读、ext4 MMP 约 21s 阻塞拒挂、在线 `NodeExpandVolume`（1 GiB → 2 GiB）、`FIFREEZE` → `CreateSnapshot` → `FITHAW`、`raw` 只读发布后由 `ext4.OpenFile` + `commit.WriteLayer(&commit.Ext4Source{})` 正确打包增量文件/`0:0` whiteout/`trusted.overlay.opaque`/`.meta/base-image.json`、卸载 `FITRIM` 回收（`66988 KiB -> 1388 KiB`）以及跨节点重新挂载。 |
-| **Helm Chart 语法与模板渲染** | **已通过** | `make helm-lint` 通过；开启 `loopCSI.enabled=true` 的 `helm template` 渲染通过。 |
+| **真实 Linux 内核 Loop E2E** | **已通过** | 通过 [`hack/loop-csi-e2e.sh`](../hack/loop-csi-e2e.sh) 在特权容器内以 Docker 宿主机 `ext4` 后端盘运行 [`TestE2ERealKernel`](../internal/loopcsi/e2e_linux_test.go) 与 [`TestLinuxAttach`](../internal/loopdev/loopdev_linux_test.go)（含 GPFS 守卫改动后重跑通过）：实测真实 `/dev/loop*` 绑定、`DirectIO=true` 回读校验、OFD 写锁拒绝第二写者与 `raw` 读、ext4 MMP 约 21s 阻塞拒挂、在线 `NodeExpandVolume`（1 GiB → 2 GiB）、`FIFREEZE` → `CreateSnapshot` → `FITHAW`、`raw` 只读发布后由 `ext4.OpenFile` + `commit.WriteLayer(&commit.Ext4Source{})` 正确打包增量文件/`0:0` whiteout/`trusted.overlay.opaque`/`.meta/base-image.json`、卸载 `FITRIM` 回收（`66988 KiB -> 1388 KiB`）以及跨节点重新挂载。 |
+| **Helm Chart 语法与模板渲染** | **已通过** | `make helm-lint`、`helm package` 与 `make lint-config` 通过；开启 `loopCSI.enabled=true` 的 `helm template`（覆盖 `omitted`、`off`、`false`、`"off"`、`preferred`、`required`）渲染全部通过。 |
 | **真实集群 + VAST NFSv3 池（2 个 GPU 节点）** | **已通过（12/12）** | 用 [`hack/loop-csi-cluster-verify.sh`](../hack/loop-csi-cluster-verify.sh) 在开发集群的两个 GPU 节点上部署驱动，池目录是两节点共同挂载的 VAST NFSv3 子目录（`vers=3,nconnect=16,hard`，脚本会校验两节点挂载源一致并跨节点读回标记文件，否则拒绝运行）。通过项：创建稀疏 `disk.img`、挂载并写入 256 MiB 与 500 个小文件、在线扩容 2Gi → 4Gi、第二节点挂载被驱动以 `FailedPrecondition ... is in use` 拒绝、快照后恢复内容摘要一致、卸载后跨节点接管内容摘要一致。 |
 | **同一次验证中的未覆盖项** | **未验证** | 未测：节点断网后的租约驱逐、网络抖动下 `hard` 挂载的行为、吞吐与延迟（本次只做功能验证，没有性能数据）、`DevBoxCommit` 的 `ExecFreezer` 全链路、`FICLONE`。T4 只证明第二写者被拒，没有区分是 OFD 锁、租约还是 MMP 起的作用。 |
 | **卸载后 `FITRIM` 回收（VAST NFSv3）** | **未回收** | 卸载前后 `disk.img` 实际占用同为 308994048 字节（文件大小 4294967296），NFSv3 池上空间不会随 `FITRIM` 归还。容量规划要按高水位计。 |
-| **GPFS 池** | **阻塞，已定位到 GPFS 内核模块缺陷** | 在 GPFS（`/fs1`，IBM Storage Scale 5.2.3.5，内核 5.15.0-94）上通过驱动发布卷时，两个不同节点各出现一次整机重启。根因来自两个节点 `/var/lib/systemd/pstore/` 里 ERST 保存的崩溃记录：`mmfs26` 模块中 `dioRdWr` 在 `retrieveDAandVerifyAligned` 处发生空指针解引用（`BUG: kernel NULL pointer dereference, address: 0000000000000000`），调用栈为 `loop_workfn` → `lo_rw_aio` → `gpfs_f_read_iter` → `gpfsRead` → `dioRdWr`。节点上 `kernel.panic_on_oops=1`、`kernel.panic=10`，因此直接 `Kernel panic - not syncing: Fatal exception` 后重启，约 3.5 分钟是整机重启加 GPFS 重新加入的时间，并非看门狗。最初"整机冻结、无内核日志"的判断是因为 journald 来不及落盘。崩溃发生在 loop 工作线程对 GPFS 文件发起 direct I/O 读时，与驱动代码、租约写入无关。尚未验证具体触发的镜像区域（推测与稀疏镜像上未分配块的 direct 读有关），也未验证关闭 direct I/O 是否绕开该缺陷。在 IBM 给出修复前不要在 GPFS 上发布 loop 卷。 |
+| **GPFS 池（`directIO: required` 崩溃定位与防护）** | **已根因定位并完成运行时防护** | 在 GPFS（`/fs1`，IBM Storage Scale 5.2.3.5，内核 5.15.0-94-generic）上首次尝试以 `O_DIRECT` 发布 loop 卷时，两台节点触发内核空指针崩溃并保留 ERST pstore 记录：内核 `loop` 工作线程（`current->mm == NULL`）经 `loop_workfn` → `lo_rw_aio` 发起异步 `O_DIRECT` I/O，命中 `mmfs26` `gpfs_f_aio_{read,write}_internal`（`file.c:2769/2911`）进入 `CXI_READ_AIO`（`RSI=0x400`），而 `rdwrInternal`（`file.c:2003`）因 `current->mm == NULL` 跳过 `cxiMapUserBuffers`，随后 `dioRdWr + 0x58c` 在 AIO 路径直接解引用未初始化的 `pageListsP->pageListPP[0]` 导致 `Kernel panic`。现已在 [`loopdev`](../internal/loopdev/loopdev_linux.go) 与 [`loopcsi`](../internal/loopcsi/node.go) 落地 `statfs(0x47504653)` 守卫：禁止在 GPFS 上以 `O_DIRECT` 或 `LO_FLAGS_DIRECT_IO` 打开/绑定 loop 设备，`directIO: required` 直接返回 `FailedPrecondition`，`directIO: preferred` 记录告警并安全回退为缓冲 loop。 |
+| **GPFS 池（单节点与跨节点全套实测）** | **单节点 + 跨节点均实测通过** | 在 GPFS 节点 `gn-10-243-145-103` 与 `gn-10-243-145-106`（Scale 5.2.3.5 + Linux 5.15.0-94-generic，`vfs_iter_read` 路径，不受 `IJ60020` 影响；控制器在 `mn-10-243-144-51`）上使用 `verify3-1118` 镜像对 `/fs1/devpilot-loop-verify` 完成 8 项实测：**T1** `directIO: required` 被 `FailedPrecondition` 干净拒绝且节点保持 `Ready`；**T2** `directIO: preferred` 自动回退至 `/dev/loop7`（`DIO=0`）正常读写与卸载；**T3** `directIO: off`（同步验证 Helm YAML 1.1 修复）完成稀疏创建（初始 32 MiB）、256 MiB + 500 小文件 + symlink、在线扩容 `2Gi → 4Gi`、`VolumeSnapshot` + 恢复摘要一致（`50e4a505...`）及 `FITRIM` 回收（`322961408` → `50331648` 字节）；**T4** 跨节点 RW 与 `ModeRaw` 冲突均被 `FailedPrecondition` 拒绝；**T5** 重启 `103` 上 `loop-csi-node` 后插件恢复状态（`Recovered read-write volume`），跨节点 OFD 锁仍生效且租约心跳恢复续期；**T6** 卸载后 `106` 成功接管且摘要一致（`4c5c990f...`），`ModeRaw` 在 `103` 零 loop 设备暴露 `/data/disk.img` 并通过 `F_RDLCK` 互斥 `106` 写者；**T7** 无锁态写伪造活跃租约被 `live lease` 阻塞并在 45s TTL 过期后自动接管；**T8** 在 `256Mi` 容器内存上限下写入 `1.5 GiB` + 1000 小文件并校验 SHA-256 全部 `OK`，挂载维持 `rw`，`dmesg` 无报错。**仍未覆盖**：长周期/全节点级别高内存压力回收压测、`DevBoxCommit` CR 经 `ExecFreezer` 触发 GPFS 快照的全链路、以及 Option B（NBD）编码实现。 |
 | **CephFS 池** | **未验证** | 开发集群的 StorageClass 中只有 Ceph RBD，没有 CephFS，本次没有测 CephFS；`.snap` 快照策略仅有单元测试。 |
 | **服务端协议策略** | **已确认** | 该 VAST 服务端拒绝 NFSv4.x，只能使用 NFSv3；NFSv3 下 `O_DIRECT` 的 loop 挂载与跨节点 OFD 锁拒绝已在上面的 12 项中实测可用。 |
 
@@ -92,11 +93,29 @@
   2. `mkfs.ext4 -b 4096` 强制 4 KiB 块大小，[`AttachFile`](../internal/loopdev/loopdev_linux.go) 使用 `LOOP_CONFIGURE` 显式设置 `Size = 4096` 与 `LO_FLAGS_DIRECT_IO | LO_FLAGS_AUTOCLEAR`（5.8 之前老内核回退 `LOOP_SET_FD` + `LOOP_SET_BLOCK_SIZE` + `LOOP_SET_DIRECT_IO`）。
   3. **拦截静默降级**：Linux 内核在对齐不满足时会静默剥离 `LO_FLAGS_DIRECT_IO` 而不返回错误。[`AttachFile`](../internal/loopdev/loopdev_linux.go) 绑定后立即调用 `LOOP_GET_STATUS64` 回读 `Flags`，在默认策略 `directIO: required` 下若发现 `DirectIO == false`，立即执行 `LOOP_CLR_FD` 清理并返回 `ErrDirectIOUnavailable`（CSI 侧转为 `FailedPrecondition`，并提示可显式设为 `preferred`）。
 
-### 4.3 风险三：GPFS 在高版本内核下的缓冲 Loop 问题（IBM APAR `IJ60020`）
+### 4.3 风险三：GPFS 的双重冲突（`mmfs26` 内核 Direct I/O 崩溃 + 高版本内核 APAR `IJ60020`）
 
-- 公开资料记录 Linux `6.15+` 及部分合入缓冲 loop `vfs_iter` 变更的发行版内核与特定版本 IBM Storage Scale 客户端组合下，缓冲模式 loop 设备存在数据损坏风险（IBM APAR `IJ60020`，**需在目标 GPFS 集群实际核对客户端与内核版本并验证**）。
-- 本实现通过默认强制 `directIO: required`（绕过缓冲路径）并在 PoC 清单中要求先行校验 `DirectIO=true` 与客户端版本来规避该风险。
-- **实测发现的另一缺陷**：在 Storage Scale 5.2.3.5 + 内核 5.15.0-94 上，direct I/O 模式的 loop 读 GPFS 文件会使 `mmfs26` 的 `dioRdWr` 空指针崩溃并导致整机 panic（见第 2 节 GPFS 行）。因此 direct I/O 在该组合上并不安全，需要先向 IBM 提交崩溃栈并换用已修复的版本，之后才能把 GPFS 当作池后端。该缺陷不会以 `ErrDirectIOUnavailable` 之类的错误返回，驱动无法在运行时防御，只能靠部署前的版本核对。
+1. **已定位的 `mmfs26` Direct I/O 内核空指针崩溃（IBM Storage Scale `5.2.3-5` + Linux `5.15.0-94-generic`）**：
+   - 经对节点 `/usr/lpp/mmfs/src/gpl-linux/` GPL 源码与 `/lib/modules/5.15.0-94-generic/extra/mmfs26.ko` 反汇编核验，完整崩溃链为：
+     1. 内核 `loop` 在 `kworker` 线程（`current->mm == NULL`）经 `loop_workfn` → `lo_rw_aio` 发起异步 `kiocb` 读写（`ITER_BVEC`）；
+     2. 当 `disk.img` 以 `O_DIRECT` 打开（`vinfoP->viIsDIO = true`）且未设 `O_SYNC`、`iov_count == 1` 时，`gpfs_f_aio_read_internal` / `gpfs_f_aio_write_internal`（`file.c:2769` / `2911`）走入 `CXI_READ_AIO` / `CXI_WRITE_AIO`（传入 `CXI_RDWROPTS_AIO = 0x400`，与两次崩机现场寄存器 `RSI: 0000000000000400` 完全一致）；
+     3. `rdwrInternal`（`file.c:2003`）仅在 `vinfoP->viIsDIO && (current->mm != NULL)` 时调用 `cxiMapUserBuffers`，在 `kworker` 上直接跳过，留下 `pageLists = {.plCount = 0, .pageListPP = NULL}`；
+     4. `mmfs26.ko` 中 `_Z7dioRdWr... + 0x58c` 的 AIO 分支未校验 `pageListsP->plCount > 0` 直接解引用 `pageListsP->pageListPP[0]`，立即触发 `BUG: kernel NULL pointer dereference` 与整机 panic。
+   - **为什么 `O_SYNC` 也不能启用 `O_DIRECT`**：即使跳过 `CXI_READ_AIO`，`dioRdWr` 仍会调用 `Buffer::attachUio` → `cxiMapUserBuffer`（`cxiIOBuffer.c:1013`），后者在 `current->mm == NULL` 时直接返回 `-ENOMEM`。
+   - **为什么早期手动回放未复现**：仅对 `disk.img` 做 `open`/`flock` 而不绑定 `/dev/loop*` 挂载 `ext4`，以及仅使用 `losetup --direct-io=on`（不向 `open()` 传 `O_DIRECT`），均不会触发 `viIsDIO && !is_sync_kiocb`。
+
+2. **高版本内核缓冲 Loop 缺陷（IBM APAR `IJ60020` / Doc `7289248`）**：
+   - 在合入上游提交 `f2fed441c69b`（`"loop: stop using vfs_iter_{read,write} for buffered I/O"`，覆盖 `6.15+`、`6.12.25+`、Ubuntu `6.14.4+`、RHEL `5.14.0-597+`、SLES `6.4.0-150700.53.6+`）的内核上，Scale `< 5.2.3.10` / `< 6.0.1.2` 的缓冲 `loop` 存在数据损坏风险。
+   - 开发集群 `bz1-dev1` 当前为 Ubuntu `5.15.0-94-generic`（`/proc/kallsyms` 确认仍走 `vfs_iter_read`），因此 **单节点在关闭 `directIO` 时可安全使用 GPFS Pagepool 缓冲 `loop`**（`gpfs_f_rdwr_iter` 走 `kmap(bv_page)` + `UIO_SYSSPACE`，不会进入 `dioRdWr`）。
+
+3. **已落地的运行时 GPFS 防线与降级策略（[`loopdev.go`](../internal/loopdev/loopdev.go)、[`loopdev_linux.go`](../internal/loopdev/loopdev_linux.go)、[`node.go`](../internal/loopcsi/node.go)）**：
+   - [`OpenBacking`](../internal/loopdev/loopdev_linux.go) 在 `dio=true` 时先通过 `statfs` 校验魔数 `GPFSSuperMagic (0x47504653)`，命中 GPFS 直接拒绝以 `O_DIRECT` 打开并返回 [`ErrGPFSDirectIOUnsafe`](../internal/loopdev/loopdev.go)。
+   - [`AttachFile`](../internal/loopdev/loopdev_linux.go) 通过 `Fstatfs` 与 `fcntl(F_GETFL)` 二次兜底校验：任何携带 `O_DIRECT` 的 GPFS 描述符一律拒绝绑定；未带 `O_DIRECT` 时，[`validateGPFSDirectIOMode`](../internal/loopdev/loopdev.go) 仅放行 `preferred`/`off`（强制 `wantDIO = false`），拒绝 `required`。
+   - [`NodeServer.publishReadWrite`](../internal/loopcsi/node.go)：`directIO: required` 返回 `FailedPrecondition`；`directIO: preferred` 记录明确告警（提示仅在不受 `IJ60020` 影响的内核安全）并自动降级为 `directIO: off` 重试；`directIO: "off"` 直接走缓冲模式。
+
+4. **后续演进方向（Option B & Option C）**：
+   - **Option B — 用户态 `O_DIRECT` NBD 块设备（中长期可实现）**：若未来升级至 Linux `6.14+` 或需要在 GPFS 上彻底消除双重页缓存，可引入用户态 NBD 服务端（集群节点已加载 `nbd` 模块）以普通用户态进程（持有合法 `current->mm`）对 `disk.img` 执行同步 `pread`/`pwrite` + `O_DIRECT` 并通过 `/dev/nbdX` 挂载 `ext4`，同时规避 `mmfs26` 内核线程空指针、缓冲双重缓存与 `IJ60020`。工程代价为需管理每卷 NBD 常驻进程生命周期、崩溃恢复与持锁语义。
+   - **Option C — IBM 官方 PMR 修复材料**：若向 IBM Storage Scale 提交 PMR，可附带 OS/内核（Ubuntu 22.04.5 / `5.15.0-94-generic`）、Scale 版本（`5.2.3-5`）、触发条件（`loop_workfn` → `lo_rw_aio` + `O_DIRECT` + `current->mm == NULL` + `!O_SYNC` + `iov_count == 1`）、源码位置（`file.c:2003, 2769, 2911`；`cxiIOBuffer.c:1013`）及汇编崩溃点（`_Z7dioRdWr... + 0x58c` 处 `RSI=0x400` 访问空 `pageListsP->pageListPP`）。
 
 ### 4.4 风险四：存储网络瞬断与 `ext4` 错误修复
 
@@ -105,40 +124,40 @@
 
 ### 4.5 风险五：稀疏高水位膨胀与打洞回收（`FITRIM`）
 
-- **镜像创建**：[`createImage`](../internal/loopcsi/image.go) 创建稀疏文件并执行 `mkfs.ext4 -F -q -b 4096 -m 0 -O ^orphan_file[,mmp] -E lazy_itable_init=1,lazy_journal_init=1,nodiscard`（在 E2E 中 1 GiB 稀疏镜像初始物理占用约 `668 KiB`）。
+- **镜像创建**：[`createImage`](../internal/loopcsi/image.go) 创建稀疏文件并执行 `mkfs.ext4 -F -q -b 4096 -m 0 -O ^orphan_file[,mmp] -E lazy_itable_init=1,lazy_journal_init=1,nodiscard`（在 E2E 中 1 GiB 稀疏镜像初始物理占用约 `668 KiB`，GPFS 4 MiB 块大小下 2 GiB 初始占用约 `32 MiB`）。
 - **禁用实时 `-o discard`**：不在 `ext4` 挂载期开启实时 `discard`，避免用户大量 `rm` 小文件时同步触发海量远端打洞 RPC 拖慢日常交互。
-- **卸载期批量 `FITRIM`**：当 `trimOnUnmount: true`（默认开启）时，[`NodeServer.teardown`](../internal/loopcsi/node.go) 在卸载前先确保 `Thaw`，随后执行 `ioctl(FITRIM)`（默认最小范围 `trimMinLength = 1 MiB`）。若底层共享存储不支持 `FALLOC_FL_PUNCH_HOLE`（如 NFSv4.1，或部分 GPFS 配置）导致失败，仅记录信息日志并继续正常卸载，不影响停机流程。
+- **卸载期批量 `FITRIM`**：当 `trimOnUnmount: true`（默认开启）时，[`NodeServer.teardown`](../internal/loopcsi/node.go) 在卸载前先确保 `Thaw`，随后执行 `ioctl(FITRIM)`（默认最小范围 `trimMinLength = 1 MiB`）。若底层共享存储不支持 `FALLOC_FL_PUNCH_HOLE`（如 NFSv3/NFSv4.1）导致失败，仅记录信息日志并继续正常卸载，不影响停机流程；在 GPFS `/fs1` 上实测 `FITRIM` 可正常打洞归还空间（`322961408` 字节 → `50331648` 字节）。
 - **空间回收边界（`rebaseDevBox` vs `reset-rootdisk`）**：
-  - `DevBoxCommit.spec.rebaseDevBox: true` 在下次开机时调用 [`initroot.RebaseUpper`](../internal/initroot/baseimage.go) 清理已有 `disk.img` 内的 `upper/`、`work/`、`merged/`，并未删除原 `disk.img`；因此在**支持打洞的后端**（如 CephFS / NFSv4.2）上可通过随后一次卸载 `FITRIM` 回收空间，而在**不支持打洞的后端**（如 NFSv4.1）上，彻底将高水位物理占用归零需在停机态使用 `devpilot.wutz.dev/action: reset-rootdisk` 注解（控制器直接删除 rootdisk PVC，下次开机重建全新稀疏 `disk.img`）。
+  - `DevBoxCommit.spec.rebaseDevBox: true` 在下次开机时调用 [`initroot.RebaseUpper`](../internal/initroot/baseimage.go) 清理已有 `disk.img` 内的 `upper/`、`work/`、`merged/`，并未删除原 `disk.img`；因此在**支持打洞的后端**（如 CephFS / GPFS / NFSv4.2）上可通过随后一次卸载 `FITRIM` 回收空间，而在**不支持打洞的后端**（如 NFSv3 / NFSv4.1）上，彻底将高水位物理占用归零需在停机态使用 `devpilot.wutz.dev/action: reset-rootdisk` 注解（控制器直接删除 rootdisk PVC，下次开机重建全新稀疏 `disk.img`）。
 
 ---
 
 ## 5. 性能特征与三大共享存储对比（定性评估）
 
-> **注意**：下表基于各存储系统的内核 I/O 路径与协议机制分析；受限于当前未在真实 GPFS / VAST / CephFS 集群运行基准测试，**具体吞吐与耗时需在目标集群 PoC 阶段实测验证**，此处不预设具体百分比数字。
+> **注意**：下表基于各存储系统的内核 I/O 路径与协议机制分析；受限于当前未在真实 GPFS / VAST / CephFS 集群运行性能基准压测，**具体吞吐与耗时需在目标集群 PoC 阶段实测验证**，此处不预设具体百分比数字。
 
 ### 5.1 典型 AI 开发机负载的 I/O 路径差异
 
-| 开发机操作场景 | 共享目录直挂 / `fuse-overlayfs` 路径特征 | `disk.img`（`ext4` + `LO_FLAGS_DIRECT_IO`）路径特征 |
+| 开发机操作场景 | 共享目录直挂 / `fuse-overlayfs` 路径特征 | `disk.img`（`ext4` + `loop`）路径特征 |
 | --- | --- | --- |
 | **`import torch, transformers`（热缓存）** | 存在 FUSE 用户态/内核态上下文切换，或受限于远程属性缓存有效期（`actimeo`）引发反复 `GETATTR` | 完全命中节点本机内核 `overlay` + `ext4` Page Cache 与 dcache，无网络与用户态切换 |
 | **`import torch`（冷启动首次读）** | 大量独立小文件引发串行 `LOOKUP`/`OPEN`/`READ` 元数据 RPC | 经 `ext4` 块层预读（readahead）连续拉取 `disk.img` 块区间，大幅减少 RPC 次数 |
-| **`conda` / `uv pip` 安装大型环境** | 数万个小文件的创建、写、关闭、`rename` 全部转化为串行远程 MDS/CNode/Metanode RPC，是共享存储最弱环节 | 所有目录/inode 变更在节点本地 `ext4` 内存完成，合并为连续或批量的 4K+ Direct I/O 块写与少量 `jbd2` 提交 |
+| **`conda` / `uv pip` 安装大型环境** | 数万个小文件的创建、写、关闭、`rename` 全部转化为串行远程 MDS/CNode/Metanode RPC，是共享存储最弱环节 | 所有目录/inode 变更在节点本地 `ext4` 内存完成，合并为连续或批量的块写与少量 `jbd2` 提交 |
 | **CUDA 算子并行编译（`ninja`/`nvcc`）** | 临时 `.o` 文件反复建删直接冲击远程元数据服务 | 临时文件多在本地 `ext4` 页缓存周期内被消费或删除，不触发远端元数据操作 |
 | **停机刷盘与快照克隆** | 依赖整个共享目录树操作或子卷快照；删卷需遍历 `unlink` | 卸载仅刷新 `ext4` 脏块；`CreateSnapshot` 在支持 `FICLONE` 或 CephFS `.snap` 的后端上为元数据指针级操作，在无 reflink 后端上需执行稀疏复制 |
 
 ### 5.2 GPFS vs VAST Data vs CephFS 特性与适配矩阵
 
-> 下表中的协议支持情况与版本建议（如 VAST NFSv4.2 `FICLONE`、GPFS `IJ60020` 修复版本、CephFS `.snap` 行为）**需在目标集群 PoC 时逐项实测确认**。
+> 下表中的协议支持情况与版本建议（如 VAST NFSv4.2 `FICLONE`、GPFS 跨节点锁与 `IJ60020` 修复版本、CephFS `.snap` 行为）**需在目标集群 PoC 时逐项实测确认**。
 
 | 对比维度 | IBM Storage Scale（GPFS） | VAST Data（NFS） | CephFS（内核 `ceph.ko`） |
 | --- | --- | --- | --- |
-| **客户端传输栈** | 专有内核模块 `mmfslinux` | Linux NFSv4.1 / v4.2 客户端（或 `vast-nfs`，建议开启 `hard`、`nconnect` / RDMA） | Linux 原生内核客户端 `ceph.ko`（不建议用 `ceph-fuse` 承载池） |
-| **`LO_FLAGS_DIRECT_IO`** | 支持（需确认 4 KiB 块对齐后 `DirectIO=true`） | 支持 | 支持 |
-| **`F_OFD_SETLK` 跨节点锁** | 支持分布式 Token 锁 | **需 `nfsvers=4.1` 或 `4.2`（禁用 NFSv3 与 `nolock`）** | 支持 MDS 会话锁 |
-| **`FITRIM` 打洞回收** | 取决于 Scale 版本与子块边界（需实测验证） | NFSv4.2 若服务端开启 `DEALLOCATE` 可支持；NFSv4.1 通常不支持（需实测验证） | 支持（映射为 RADOS 对象回收，已在内核路径契合度最高） |
-| **在线 `CreateSnapshot` 策略** | 通常无 Linux `FICLONE`，需走 `strategy: auto/copy`（配合 Freeze）或采用外部存储快照方案 | 若客户端+服务端支持 NFSv4.2 `FICLONE` 可走 `reflink`；否则回退稀疏 `copy`（需实测验证） | 优先配置 `strategy: cephfs-snapdir`（在卷目录下创建 `.snap/<name>` 毫秒级目录快照） |
-| **需重点核查事项** | 核查 Scale 版本以规避高版本内核缓冲 loop 缺陷（APAR `IJ60020`）；若无 `FICLONE`，大镜像热拷贝期间 Freeze 窗口较长，建议调大 `--commit-freeze-timeout` 或停机提交 | 核查挂载参数是否 `hard,nfsvers=4.1+`（严禁 `soft`/`nolock`）及是否支持 `FICLONE` | 建议池底层为全闪 NVMe OSD，确认集群允许客户端执行 `mkdir .snap/...` |
+| **客户端传输栈** | 专有内核模块 `mmfslinux` | Linux NFSv3 / NFSv4.1 / v4.2 客户端（建议开启 `hard`、`nconnect` / RDMA） | Linux 原生内核客户端 `ceph.ko`（不建议用 `ceph-fuse` 承载池） |
+| **`LO_FLAGS_DIRECT_IO`** | **禁止开启**：`5.2.3-5 + 5.15.0-94` 触发 `mmfs26` 内核 panic；驱动守卫默认拒绝 `required`，仅支持 `directIO: "off"`（或 `preferred` 降级）走缓冲模式（需确认内核不受 `IJ60020` 影响） | 支持（VAST NFSv3 已实测 `DIO=1` 稳定通过） | 支持（依赖服务端/客户端块对齐） |
+| **`F_OFD_SETLK` 跨节点锁** | **已实测可用**（GPFS 分布式 Token 锁 + 45s 租约已跨 `103`/`106` 实测 RW/ModeRaw 互斥、重启自愈与过期接管） | **已实测可用**（VAST NFSv3 + NLM + 租约 + MMP 已跨两节点实测通过；生产仍推荐 `nfsvers=4.1/4.2` 且禁用 `nolock`） | 支持 MDS 会话锁 |
+| **`FITRIM` 打洞回收** | **已实测支持**（`/fs1` 上 `308 MiB → 48 MiB`） | NFSv3 / NFSv4.1 不回收（已实测）；NFSv4.2 取决于服务端 `DEALLOCATE` | 支持（映射为 RADOS 对象回收，已在内核路径契合度最高） |
+| **在线 `CreateSnapshot` 策略** | 无 Linux `FICLONE`，走 `strategy: auto/copy`（配合 Freeze，已在 `/fs1` 单节点实测通过） | 无 `FICLONE` 时走稀疏 `copy`（已在 VAST NFSv3 实测通过）；NFSv4.2 支持 `CLONE` 时可走 `reflink` | 优先配置 `strategy: cephfs-snapdir`（在卷目录下创建 `.snap/<name>` 毫秒级目录快照） |
+| **需重点核查事项** | 必须配置 `directIO: "off"` 且核查内核不受 `IJ60020` 影响（若升级至 `6.14+` 需先升级 Scale 至 `>=5.2.3.10`/`6.0.1.2` 或采用 NBD 方案）；调大 `--commit-freeze-timeout` 适配大镜像拷贝 | 核查挂载参数是否 `hard`（严禁 `soft`/`nolock`）；NFSv3 池按高水位做容量规划 | 建议池底层为全闪 NVMe OSD，确认集群允许客户端执行 `mkdir .snap/...` |
 
 ---
 
@@ -229,7 +248,7 @@ loopCSI:
   storageClasses:
     - name: shared-loop-vast
       pool: vast
-      directIO: required     # required | preferred | off
+      directIO: required     # required | preferred | "off"（GPFS 池必须设为 "off" 或在安全内核下设为 preferred）
       trimOnUnmount: true    # 卸载前执行 FITRIM 打洞
       trimMinLength: "1048576"
       mmp: true              # 开启 ext4 Multi-Mount Protection
@@ -254,10 +273,10 @@ defaults:
 ### 生产 PoC 准入检查清单（开启 `loopCSI.enabled=true` 前必做）
 
 在真实共享存储集群打开此特性前，建议按顺序完成以下实测验证：
-1. **Direct I/O 回读核验**：在目标节点共享池目录创建一个 4K 对齐文件，绑定 loop 后确认 `losetup -O NAME,DIO -l` 显示 **`DIO=1`**（`directIO: required` 可正常挂载而非报 `ErrDirectIOUnavailable`）。
+1. **Direct I/O 回读与 GPFS 策略核验**：非 GPFS 池在目标节点共享池目录绑定 loop 后确认 `losetup -O NAME,DIO -l` 显示 **`DIO=1`**；若为 IBM Storage Scale（GPFS）池，驱动守卫会拒绝 `directIO: required`，仅可在已确认内核不受 `IJ60020` 影响时设置 `directIO: "off"`（或 `preferred`）。
 2. **跨节点锁与断网接管测试**：在两台节点上用相同池路径测试 `F_OFD_SETLK` 互斥生效；模拟持锁节点宕机/断网，确认在存储协议租约期内旧锁释放且新节点可安全接管，无 `nolock` 或时间不同步问题。
-3. **版本与安全基线**：确认节点 NTP 时钟同步正常；如使用 IBM Storage Scale，确认客户端/服务端版本已涵盖高版本内核缓冲 loop 相关修复（如 `IJ60020`）；确认 CephFS 使用内核态 `ceph.ko`、NFS 使用 `hard,nfsvers=4.1+`。
-4. **快照与清理验证**：实测目标池上 `CreateSnapshot`（`.snap`、`FICLONE` 或稀疏复制）的实际耗时并据此设置 `--commit-freeze-timeout`，同时验证 `FITRIM` 是否生效（若返回 `EOPNOTSUPP`，提前在运维指引中明确需用 `reset-rootdisk` 回收高水位空间）。
+3. **版本与安全基线**：确认节点 NTP 时钟同步正常；如使用 IBM Storage Scale，确认客户端/服务端与内核版本组合不存在 `IJ60020`（`6.15+` / `6.12.25+` / Ubuntu `6.14.4+` 需 Scale `>=5.2.3.10` / `6.0.1.2`）；确认 CephFS 使用内核态 `ceph.ko`、NFS 使用 `hard`（推荐 `nfsvers=4.1+`）。
+4. **快照与清理验证**：实测目标池上 `CreateSnapshot`（`.snap`、`FICLONE` 或稀疏复制）的实际耗时并据此设置 `--commit-freeze-timeout`，同时验证 `FITRIM` 是否生效（若返回 `EOPNOTSUPP` 或占用不变，提前在运维指引中明确需用 `reset-rootdisk` 回收高水位空间）。
 
 ---
 
@@ -272,3 +291,4 @@ defaults:
 | **`ext4` 日志处理能力** | 假设用户态只读解析器要求镜像必须绝对干净、无法处理未重放日志 | 在 [`internal/ext4/journal.go`](../internal/ext4/journal.go) 完整实现了**内存只读 jbd2 日志重放**；同时控制器依然保留 Sync→Freeze 自动提升，保证快照复制窗口内磁盘零并发写入撕裂。 |
 | **在线 Freeze 超时与可信判定** | 仅概略描述 `3s` 硬超时防死锁 | 引入可配置的 `--commit-freeze-timeout`（默认 `30s`，匹配跨节点快照或复制耗时；helper 侧设 `window+10s` 兜底）；且仅当快照切点在冻结窗口内确认且 helper 正常以 `exit 0` 退出时才保留快照，否则立即销毁快照并报错 `FreezeFailed`。 |
 | **Rebase 空间回收行为** | 规划中假设 `rebaseDevBox: true` 直接替换全新空白 `disk.img` | 实际代码中 `rebaseDevBox` 复用现有 PVC 并由 `devpilot-init` 清空其中的 `upper/`/`work/`/`merged/`，因此无打洞能力后端的高水位彻底归零需通过停机 `reset-rootdisk` 注解删除重建 PVC 完成。 |
+| **GPFS `O_DIRECT` 崩溃防护与 Helm YAML 1.1 修复** | 假设所有共享存储均可默认开启 `O_DIRECT + LO_FLAGS_DIRECT_IO` | 实测 IBM Storage Scale `5.2.3-5 + 5.15.0-94` 上 `kworker`（`current->mm == NULL`）异步 `O_DIRECT` 会触发 `mmfs26` `dioRdWr` 空指针 panic；在 [`loopdev`](../internal/loopdev/loopdev_linux.go) 与 [`node.go`](../internal/loopcsi/node.go) 新增 `statfs(0x47504653)` 防护（拒绝 `required`，`preferred` 回退缓冲，禁止对带 `O_DIRECT` 的 GPFS fd 绑定 loop），并修复 [`loop-csi.yaml`](../charts/devpilot/templates/loop-csi.yaml) 中 YAML 1.1 将未加引号 `directIO: off` 解析为布尔 `false` 而被 `default "required"` 覆盖的问题。 |

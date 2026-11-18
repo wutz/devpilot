@@ -150,7 +150,7 @@ loopCSI:
   # One StorageClass per entry; DevBoxes select it in spec.rootDisk.
   #   - name: shared-loop-vast
   #     pool: vast
-  #     directIO: required     # required | preferred | off
+  #     directIO: required     # required | preferred | "off" (required is refused on GPFS due to mmfs26 dioRdWr panic)
   #     trimOnUnmount: true    # FITRIM before unmount to punch holes
   #     trimMinLength: "1048576"
   #     mmp: true              # ext4 multi-mount protection

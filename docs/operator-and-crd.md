@@ -3,7 +3,7 @@
 API Group：`devpilot.wutz.dev/v1alpha1`（遵循 `*.wutz.dev` 家族统一约定，由 Kubebuilder v4 脚手架生成）。
 
 本组件仅引入两个 Namespaced CRD：
-1. **`DevBox`**（简称 `dbox`）：声明一台持久化交互式开发机的计算规格、根盘持久化存储、接入方式、生命周期期望与计费状态。
+1. **`DevBox`**（简称 `dbox`）：声明一台持久化交互式开发机的计算规格、根盘持久化存储、接入方式、生命周期期望与计量状态。
 2. **`DevBoxCommit`**（简称 `dcommit`）：声明一次将指定 `DevBox` 当前根盘修改固化并推送至镜像仓库的不可变构建任务（模型对齐 `imagebuild.wutz.dev/v1alpha1` `ImageBuild`）。
 
 ---
@@ -23,8 +23,7 @@ metadata:
 spec:
   displayName: "PyTorch 2.4 FlashAttn 开发机"
   desiredState: Running                  # Running | Stopped
-  billingMode: Spot                      # OnDemand | Spot
-  pricePerHour: "2.80"                   # 定点金额字符串 (CNY/小时)，对齐 trainpilot Money 类型
+  preemptible: true                      # true 启用抢占模式（默认 false，创建后不可变）
 
   # 基础镜像（首次启动自动锁定 digest 到 status.activeImageDigest）
   image: cr.example.com/public/pytorch:2.4.0-cuda12.4-ubuntu22.04
@@ -113,18 +112,15 @@ status:
   interruptedAt: null
   scheduledReleaseTime: null             # 进入 Stopped/Interrupted 后 = 时间戳 + retentionDaysAfterStop
 
-  # 计费账本（对齐 trainpilot 计费段模型）
-  totalBilledSeconds: 7200
-  totalCost: "5.60"
+  # 计量台账（纯资源使用时长记录，不含价格或费用）
+  totalUsageSeconds: 7200
   segments:
     - id: 1
       nodeName: gn-10-243-145-105
-      pricePerHour: "2.80"
       startTime: "2026-11-11T08:00:00Z"
       endTime: "2026-11-11T10:00:00Z"
-      billedSeconds: 7200
-      cost: "5.60"
-      endReason: UserStopped             # Running 段为空；闭合后为 UserStopped | IdleTimeout | Preempted | NodeFailure | AccountArrears | Released
+      durationSeconds: 7200
+      endReason: UserStopped             # Running 段为空；闭合后为 UserStopped | IdleTimeout | Preempted | NodeFailure | Released
 
   conditions:
     - type: RootDiskReady
@@ -148,11 +144,11 @@ status:
                                 ▼
                            [Starting] (AllocatingResources → MountingStorage → PullingImage → StartingContainers)
                            ╱    │    ╲
-      (抢占式无库存/拒绝) ╱     │     ╲ (镜像拉取失败/切根校验失败)
+      (抢占式被驱逐/回收)  ╱     │     ╲ (镜像拉取失败/切根校验失败)
                         ▼       ▼      ▼
                [Interrupted] [Running] [Failed]
                     ▲         │   ▲
-    (Spot 节点回收) │         │   │ (desiredState=Running 启动)
+    (抢占节点回收)   │         │   │ (desiredState=Running 启动)
                     ├─────────┘   │
                     │             │
                     │    (desiredState=Stopped 或闲置超时)
@@ -168,7 +164,7 @@ status:
                               (Deleted)
 ```
 
-### 1.3 快捷操作注解（兼容 CLI 操作习惯，对齐 `trainpilot`）
+### 1.3 快捷操作注解（兼容 CLI 操作习惯）
 
 除直接 `patch spec.desiredState` 外，支持单次动作注解。控制器在写回 `spec` 的同一次 `Update` 中删除该注解，因此同一个动词可以在之后任意时刻再次下发；不要依赖「已处理」标记去重：`stop` 这类注解的取值每次相同，用标记去重会把第二次请求当成重复投递而静默丢弃。
 - `devpilot.wutz.dev/action: stop=<timestamp>`：关机（等价于置 `desiredState: Stopped`）
@@ -181,7 +177,7 @@ status:
 1. **`rootDisk.storageClassName` 不可变**：创建后禁止修改，防止孤儿数据卷。
 2. **`rootDisk.size` 单调不减**：只允许在线扩容（`self.size >= oldSelf.size`），禁止缩容。
 3. **`spec.image` 保护**：当 `DevBox` 已初始化根盘且未同步执行重置时，直接修改 `spec.image` 会被 Webhook 拒绝并提示：「根盘包含基于原镜像的增量修改，请先通过 `DevBoxCommit` 保存镜像，或执行重置系统盘后再切换基础镜像」。
-4. **`billingMode` 不可变**：对齐 `ai-prd` §6.2，创建后抢占式（`Spot`）与按量计费（`OnDemand`）不可互转。
+4. **`preemptible` 不可变**：创建后抢占模式（`true`）与非抢占模式（`false`）不可互转。
 5. **保留环境变量名保护**：禁止 `spec.env` 覆盖 `DEVPILOT_*` 内部系统变量。
 
 ---

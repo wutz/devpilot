@@ -140,7 +140,7 @@ var _ = Describe("DevBox gateway publishing", func() {
 		Expect(route.Spec.Rules).To(HaveLen(1))
 		rule := route.Spec.Rules[0]
 		Expect(rule.Matches).To(HaveLen(1))
-		Expect(rule.Matches[0].Username).To(Equal(sanitizeUsername(namespace + "-" + box.Name)))
+		Expect(rule.Matches[0].Username).To(Equal(sshRouteUsername(box)))
 		Expect(rule.AuthorizedKeys).To(Equal([]string{clientKey}))
 		Expect(rule.BackendRefs).To(HaveLen(1))
 		Expect(rule.BackendRefs[0].Name).To(Equal(box.Name))

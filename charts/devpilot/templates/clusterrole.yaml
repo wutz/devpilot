@@ -93,7 +93,7 @@ rules:
       - get
       - list
       - watch
-  # The spot reclaim detector reads node taints, and the HTTP publisher writes
+  # The preemptible reclaim detector reads node taints, and the HTTP publisher writes
   # Ingresses; both go through the manager's wide-open default because a Helm
   # release cannot scope them to a namespace.
   # persistentvolumes: the commit controller reads the CSI driver of a root

@@ -13,7 +13,7 @@ DevPilot 聚焦解决 K8s 容器开发机的两大核心工程问题：
 
 ```text
 DevBox (devpilot.wutz.dev/v1alpha1)                DevBoxCommit (devpilot.wutz.dev/v1alpha1)
-   │  开关机 / 抢占中断 / 闲置停机 / 计费段 / GC         │  停机直读 (Stopped) / CSI 快照克隆 (Running)
+   │  开关机 / 抢占中断 / 闲置停机 / 计量段 / GC         │  停机直读 (Stopped) / CSI 快照克隆 (Running)
    ▼                                                  ▼
 ┌──────────────────── GPU 节点 ────────────────────┐ ┌────────────── 隔离构建任务 (Commit Job) ──────────────┐
 │ DevBox Pod (RuntimeClass: nvidia)                │ │ 非特权 Pod (privileged: false, 无 containerd.sock)    │
@@ -36,7 +36,7 @@ DevBox (devpilot.wutz.dev/v1alpha1)                DevBoxCommit (devpilot.wutz.d
 | --- | --- | --- |
 | 全盘持久化 | 块存储 PVC 承载 `upper/` + `work/`，内核原生 `overlay` 零 FUSE 元数据损耗；无块存储时可选 `loopCSI` 承载共享盘 `disk.img` | `block-nvme` (Ceph RBD)、`block-vast-cs` (VAST Block)、可选 `loop.devpilot.wutz.dev` |
 | GPU 驱动兼容 | `pivot_root` 前自动枚举 `/proc/self/mountinfo` 迁移 `nvidia-container-toolkit` 注入的驱动与设备挂载 | `RuntimeClass: nvidia`、HAMi vGPU、RDMA |
-| 开关机与抢占 | 关机删 Pod 释放 GPU/CPU/内存；抢占驱逐转入 `Interrupted` 保留系统盘与共享盘；连续关机/中断超期（默认 15 天）自动回收 | 对齐 `ai-prd` 容器实例抢占语义与 `trainpilot` 计费段模型 |
+| 开关机与抢占 | 关机删 Pod 释放 GPU/CPU/内存；抢占驱逐转入 `Interrupted` 保留系统盘与共享盘；连续关机/中断超期（默认 15 天）自动回收 | 对齐抢占式中断语义与运行段计量台账 |
 | 在线/离线保存镜像 | 离线直读 PVC；在线通过 CSI `VolumeSnapshot` 秒级 COW 快照克隆临时只读卷，不中断 GPU 训练进程；支持可选 Rebase 清空 `upper/` | `csi-rbdplugin-snapclass`、`vast-snapshot-cs`、可选 `devpilot-loop-snapclass`、Harbor `project-registry` |
 | 开发环境接入 | 容器内同命名空间 `sshd`（VS Code / Cursor Remote-SSH 直通完整 rootfs 与 GPU）+ JupyterLab / WebIDE 路由 | `sshgateway` (`SSHRoute`)、Gateway API / Ingress (`:7443`) |
 
@@ -46,7 +46,7 @@ DevBox (devpilot.wutz.dev/v1alpha1)                DevBoxCommit (devpilot.wutz.d
 - [持久化与镜像提交机制深潜](docs/persistence-and-commit.md) — `devpilot-init` 切根细节、NVIDIA 子挂载迁移、Whiteout 转 OCI 层、CSI 热快照与 Rebase
 - [超大基础镜像加速与预热规划](docs/image-acceleration-and-prewarm.md) — 30–100 GB 镜像冷启动瓶颈拆解、节点缓存亲和、`ImagePrewarm`、Spegel P2P 与 `zstd:chunked`/Nydus 懒加载分阶段设计
 - [共享存储可选 `disk.img` 根盘架构设计与实现说明](docs/shared-storage-disk-img.md) — 基于 `loop.devpilot.wutz.dev` 在 GPFS / VAST Data / CephFS 承载稀疏 `ext4` 根盘的锁围栏、`LO_FLAGS_DIRECT_IO` 与用户态 `ext4` 热固化实现（实验性，Chart 默认关闭）
-- [Operator 与 CRD 规范](docs/operator-and-crd.md) — `DevBox` 与 `DevBoxCommit` 完整字段定义、状态机、计费段与生命周期 GC
+- [Operator 与 CRD 规范](docs/operator-and-crd.md) — `DevBox` 与 `DevBoxCommit` 完整字段定义、状态机、计量段与生命周期 GC
 - [接入体系与安全边界](docs/access-and-security.md) — SSH 直连、Jupyter/Web 路由（端口 `7443`）、最小权限 `SecurityContext` 与凭证隔离
 - [演进路线图](docs/roadmap.md) — M0–M6 阶段划分与验证状态
 

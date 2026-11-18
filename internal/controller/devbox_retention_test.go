@@ -153,7 +153,8 @@ var _ = Describe("DevBox automation", func() {
 			Expect(box.Status.Segments).To(HaveLen(1))
 			Expect(box.Status.Segments[0].EndReason).To(Equal(devpilotv1alpha1.EndReasonIdleTimeout))
 			Expect(box.Status.Segments[0].EndTime).NotTo(BeNil())
-			Expect(box.Status.Segments[0].BilledSeconds).To(BeNumerically(">=", 600))
+			Expect(box.Status.Segments[0].DurationSeconds).To(BeNumerically(">=", 600))
+			Expect(box.Status.TotalUsageSeconds).To(Equal(box.Status.Segments[0].DurationSeconds))
 
 			By("reporting what happened")
 			ready := metaCondition(box, ConditionReady)
@@ -198,14 +199,13 @@ var _ = Describe("DevBox automation", func() {
 			Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseStopping))
 		})
 
-		It("bills the run it shuts down even when the heartbeat is older than the pod", func() {
+		It("meters the run it shuts down even when the heartbeat is older than the pod", func() {
 			// The ledger must open before the idle verdict is taken: a stale
 			// heartbeat left over from the previous run would otherwise shut a
 			// freshly started devbox down in the same reconcile that first sees it
-			// Running, closing no segment and billing nothing.
+			// Running, closing no segment and recording zero usage.
 			box := newTestDevBox("fresh", namespace)
 			box.Spec.Lifecycle.IdleShutdownMinutes = 10
-			box.Spec.PricePerHour = "2.80"
 			box.Annotations = map[string]string{AnnotationLastActive: timeNow().Add(-time.Hour).Format(time.RFC3339)}
 			key := runBox(box)
 
@@ -222,8 +222,8 @@ var _ = Describe("DevBox automation", func() {
 			Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseStopping))
 			Expect(box.Status.Segments).To(HaveLen(1))
 			Expect(box.Status.Segments[0].EndReason).To(Equal(devpilotv1alpha1.EndReasonIdleTimeout))
-			Expect(box.Status.Segments[0].BilledSeconds).To(BeNumerically(">=", 600))
-			Expect(box.Status.TotalCost).NotTo(Equal("0.00"), "an idle timeout is still a run to bill")
+			Expect(box.Status.Segments[0].DurationSeconds).To(BeNumerically(">=", 600))
+			Expect(box.Status.TotalUsageSeconds).To(BeNumerically(">=", 600), "an idle timeout is still a run to meter")
 		})
 
 		It("leaves a devbox alone when idle shutdown is disabled", func() {
@@ -424,7 +424,7 @@ var _ = Describe("Retention arithmetic", func() {
 		now := timeNow()
 		start := metav1.NewTime(now.Add(-10 * time.Minute))
 		box.Status.Phase = devpilotv1alpha1.PhaseRunning
-		box.Status.Segments = []devpilotv1alpha1.BillingSegment{{ID: 1, StartTime: start}}
+		box.Status.Segments = []devpilotv1alpha1.UsageSegment{{ID: 1, StartTime: start}}
 		Expect(automationWake(box, now)).To(Equal(20 * time.Minute))
 
 		box.Status.Phase = devpilotv1alpha1.PhaseStopped

@@ -6,4 +6,24 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: devbox-sample
 spec:
-  # TODO(user): Add fields here
+  displayName: "Sample GPU DevBox"
+  desiredState: Running
+  billingMode: OnDemand
+  image: nvcr.io/nvidia/pytorch:25.08-py3
+  resources:
+    gpus: 1
+    gpuModel: rtx-5090
+    cpu: "8"
+    memory: 32Gi
+    shmRatio: "0.5"
+  rootDisk:
+    size: 100Gi
+    storageClassName: block-nvme
+    retentionDaysAfterStop: 15
+  access:
+    ssh:
+      enabled: true
+      username: root
+    jupyter:
+      enabled: true
+      port: 8888

@@ -403,6 +403,13 @@ func volumeMounts(box *devpilotv1alpha1.DevBox) []corev1.VolumeMount {
 			ReadOnly:  true,
 		})
 	}
+	for _, extra := range extraVolumes(box) {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      extra.Name,
+			MountPath: extra.MountPath,
+			ReadOnly:  extra.ReadOnly,
+		})
+	}
 	return mounts
 }
 
@@ -495,18 +502,7 @@ func volumes(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, sh
 	if jupyterEnabled(box) {
 		vols = append(vols, jupyterVolume(box))
 	}
-	seen := map[string]struct{}{
-		InitVolumeName:     {},
-		RootDiskVolumeName: {},
-		ShmVolumeName:      {},
-		SSHVolumeName:      {},
-		JupyterVolumeName:  {},
-	}
-	for _, extra := range box.Spec.Volumes {
-		if _, dup := seen[extra.Name]; dup || extra.PersistentVolumeClaim == nil {
-			continue
-		}
-		seen[extra.Name] = struct{}{}
+	for _, extra := range extraVolumes(box) {
 		vols = append(vols, corev1.Volume{
 			Name: extra.Name,
 			VolumeSource: corev1.VolumeSource{
@@ -515,6 +511,27 @@ func volumes(box *devpilotv1alpha1.DevBox, pvc *corev1.PersistentVolumeClaim, sh
 		})
 	}
 	return vols
+}
+
+// extraVolumes returns the user PVC volumes declared on the DevBox, skipping
+// duplicate names and names reserved by the operator's own volumes.
+func extraVolumes(box *devpilotv1alpha1.DevBox) []devpilotv1alpha1.DevBoxVolume {
+	seen := map[string]struct{}{
+		InitVolumeName:     {},
+		RootDiskVolumeName: {},
+		ShmVolumeName:      {},
+		SSHVolumeName:      {},
+		JupyterVolumeName:  {},
+	}
+	out := make([]devpilotv1alpha1.DevBoxVolume, 0, len(box.Spec.Volumes))
+	for _, extra := range box.Spec.Volumes {
+		if _, dup := seen[extra.Name]; dup || extra.PersistentVolumeClaim == nil {
+			continue
+		}
+		seen[extra.Name] = struct{}{}
+		out = append(out, extra)
+	}
+	return out
 }
 
 // setFailed marks the DevBox as failed without blocking future reconciles: a

@@ -1,0 +1,32 @@
+# 停机离线固化并 Rebase 示例：
+# 适合通过 apt/conda/pip 安装大量系统库或多次在线 Commit 后，
+# 在 DevBox 关机状态下离线构建并推包，并在推送完成后自动：
+# 1. 在源 DevBox 上次所在节点预热新镜像（prewarmNode: true）
+# 2. 将 DevBox 基础镜像切换为新推送镜像，下次开机自动清空旧 upper/（rebaseDevBox: true）
+apiVersion: devpilot.wutz.dev/v1alpha1
+kind: DevBoxCommit
+metadata:
+  name: commit-pytorch-rebase-v2
+  namespace: default
+spec:
+  devBoxName: kcs-pytorch-dev
+  destination:
+    repository: registry.example.com/team/pytorch-dev
+    tags:
+      - v2
+      - "2026.11"
+  consistency: OfflineOnly
+  compression: zstd:chunked
+  cleanPackageCache: true
+  excludePaths:
+    - "root/.cache/pip/**"
+    - "tmp/**"
+  changes:
+    author: "ml-team@example.com"
+    comment: "Pin CUDA toolkit + FlashAttention and rebase rootdisk"
+    workingDir: /workspace
+    env:
+      - name: TORCH_CUDA_ARCH_LIST
+        value: "8.9;9.0"
+  rebaseDevBox: true
+  prewarmNode: true

@@ -1,0 +1,35 @@
+# 纯 CPU 开发机示例：零 GPU、默认按需创建且初始为关机（Stopped）状态，
+# 适合代码编辑、数据清洗、CPU 编译调试或先准备系统盘后按需开机。
+apiVersion: devpilot.wutz.dev/v1alpha1
+kind: DevBox
+metadata:
+  name: cpu-workspace
+  namespace: default
+spec:
+  displayName: "CPU 预处理与调试开发机"
+  desiredState: Stopped
+  billingMode: OnDemand
+  image: ubuntu:24.04
+  env:
+    - name: PIP_INDEX_URL
+      value: https://pypi.tuna.tsinghua.edu.cn/simple
+  resources:
+    gpus: 0
+    cpu: "4"
+    memory: 16Gi
+    shmRatio: "0.25"
+  rootDisk:
+    size: 50Gi
+    storageClassName: block-nvme
+    retentionDaysAfterStop: 15
+  access:
+    ssh:
+      enabled: true
+      username: root
+      authorizedKeys:
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...ExampleKey== developer@workstation"
+    jupyter:
+      enabled: true
+      port: 8888
+  lifecycle:
+    idleShutdownMinutes: 60

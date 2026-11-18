@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes the three images and the Helm chart on a version tag. A tag is the
+# Publishes the four images and the Helm chart on a version tag. A tag is the
 # only trigger: releases are cut from main, and a dispatch could otherwise push
 # a chart whose CRDs do not match the images it points at.
 on:
@@ -31,6 +31,8 @@ jobs:
             dockerfile: Dockerfile.init
           - name: devpilot-commit
             dockerfile: Dockerfile.commit
+          - name: devpilot-loop-csi
+            dockerfile: Dockerfile.loop-csi
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

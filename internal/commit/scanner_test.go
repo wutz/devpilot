@@ -304,10 +304,9 @@ func TestWriteEntryConvertsOverlayDeletionToWhiteout(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	var stats Stats
-	// abs does not exist: the conversion must not open the "file".
-	err := writeEntry(tw, entry{
+	// The root does not exist: the conversion must not open the "file".
+	err := writeEntry(tw, DirSource{Root: filepath.Join(t.TempDir(), "absent")}, entry{
 		rel:  "opt/nvidia/entrypoint.d/12-banner.sh",
-		abs:  filepath.Join(t.TempDir(), "absent"),
 		info: fakeInfo{mode: fs.ModeCharDevice | 0o600, sys: &syscall.Stat_t{}},
 	}, nil, map[uint64]string{}, &stats)
 	if err != nil {
@@ -344,9 +343,8 @@ func TestWriteEntryLeavesRealDevicesAndPipesOut(t *testing.T) {
 			tw := tar.NewWriter(&buf)
 			var stats Stats
 			// A non-zero rdev means a real device node, not a deletion.
-			err := writeEntry(tw, entry{
+			err := writeEntry(tw, DirSource{Root: upper}, entry{
 				rel:  name,
-				abs:  filepath.Join(upper, name),
 				info: fakeInfo{mode: mode, sys: &syscall.Stat_t{Rdev: 1}},
 			}, nil, map[uint64]string{}, &stats)
 			if err != nil {

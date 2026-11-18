@@ -25,6 +25,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -50,6 +51,16 @@ func run(args []string, stderr *os.File) int {
 }
 
 func runWithContext(ctx context.Context, args []string, stderr *os.File) int {
+	return runIOWithContext(ctx, args, os.Stdin, os.Stdout, stderr)
+}
+
+// runIO is run with the standard streams injectable; only the freeze helper
+// talks on stdin and stdout.
+func runIO(args []string, stdin io.Reader, stdout io.Writer, stderr *os.File) int {
+	return runIOWithContext(context.Background(), args, stdin, stdout, stderr)
+}
+
+func runIOWithContext(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr *os.File) int {
 	logf := func(msg string, kv ...any) {
 		_, _ = fmt.Fprintf(stderr, "devpilot-init: %s\n", initroot.FormatMessage(msg, kv...))
 	}
@@ -64,6 +75,9 @@ func runWithContext(ctx context.Context, args []string, stderr *os.File) int {
 		installPath string
 		gracePeriod time.Duration
 		flush       bool
+		freeze      bool
+		thaw        bool
+		freezeLimit time.Duration
 		rebase      bool
 		noop        bool
 		hold        bool
@@ -94,6 +108,14 @@ func runWithContext(ctx context.Context, args []string, stderr *os.File) int {
 		"Exit 0 immediately; used by one-shot image pre-pull and pre-warm Pods after the kubelet pulls the image.")
 	fs.BoolVar(&hold, "hold", false,
 		"Sleep until SIGTERM/SIGINT; used by pinned ImagePrewarm sentinel Pods to prevent kubelet image GC.")
+	fs.BoolVar(&freeze, "freeze", false,
+		"Freeze the root disk filesystem, print \"frozen\", and thaw once stdin delivers a line or EOF; "+
+			"used by the operator around an online commit snapshot. Exit 0: released via stdin; "+
+			"2: never frozen; 3: thawed by timeout or signal (the snapshot is invalid); 4: thaw failed.")
+	fs.BoolVar(&thaw, "thaw", false,
+		"Thaw the root disk filesystem and exit; a filesystem that is not frozen counts as thawed.")
+	fs.DurationVar(&freezeLimit, "freeze-timeout", initroot.DefaultFreezeTimeout,
+		"Longest time --freeze keeps the filesystem frozen before thawing on its own.")
 	fs.StringVar(&sshListen, "ssh-listen", "",
 		"Address the built-in SSH server binds, e.g. \":22\"; empty disables it.")
 	fs.StringVar(&sshHostKey, "ssh-host-key", "",
@@ -119,6 +141,32 @@ func runWithContext(ctx context.Context, args []string, stderr *os.File) int {
 		logf("Holding sentinel pod until signal")
 		<-ctx.Done()
 		logf("Released sentinel hold")
+		return 0
+	}
+
+	if freeze && thaw {
+		logf("--freeze and --thaw are mutually exclusive")
+		return 1
+	}
+
+	// A strict online commit freezes the root disk around the snapshot. Like
+	// --flush this runs as an exec'd second instance: it reaches the root disk
+	// through the descriptors PID 1 opened before pivot_root, and it carries
+	// the container's CAP_SYS_ADMIN, which PID 1 itself dropped.
+	if freeze {
+		return initroot.FreezeRootDisk(initroot.FreezeOptions{
+			Timeout: freezeLimit,
+			Stdin:   stdin,
+			Stdout:  stdout,
+			Logf:    logf,
+		})
+	}
+	if thaw {
+		if err := initroot.ThawRootDisk(); err != nil {
+			logf("Could not thaw the root filesystem", "err", err.Error())
+			return 1
+		}
+		logf("Thawed the root filesystem")
 		return 0
 	}
 

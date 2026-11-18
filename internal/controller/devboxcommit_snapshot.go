@@ -55,6 +55,27 @@ type RootDiskFlusher interface {
 	Flush(ctx context.Context, pod *corev1.Pod) error
 }
 
+// RootDiskFreezer freezes the root disk filesystem of a running DevBox so a
+// volume snapshot sees it in the state of a clean unmount: FIFREEZE flushes
+// the journal and clears needs_recovery. The default implementation execs the
+// devpilot-init helper; tests inject a fake.
+type RootDiskFreezer interface {
+	// Freeze returns once the filesystem is frozen. It stays frozen until the
+	// session is thawed, or until the helper's own timeout expires.
+	Freeze(ctx context.Context, pod *corev1.Pod) (FreezeSession, error)
+	// Thaw is a best-effort standalone thaw, for recovery when a session's
+	// own release may not have landed.
+	Thaw(ctx context.Context, pod *corev1.Pod) error
+}
+
+// FreezeSession is one frozen period.
+type FreezeSession interface {
+	// Thaw releases the freeze and waits for the helper to exit. It returns
+	// an error unless the filesystem demonstrably stayed frozen until this
+	// release, in which case a snapshot cut during the session is consistent.
+	Thaw(ctx context.Context) error
+}
+
 // snapshotClass resolves the volume snapshot class for the root disk: the
 // DevBox override wins, otherwise the operator-wide per-storageclass mapping.
 func (r *DevBoxCommitReconciler) snapshotClass(box *devpilotv1alpha1.DevBox) (string, error) {
@@ -175,6 +196,15 @@ func (r *DevBoxCommitReconciler) ensureSnapshotSource(
 	snapKey := types.NamespacedName{Namespace: commit.Namespace, Name: commitSnapshotName(commit)}
 	switch err := r.Get(ctx, snapKey, snap); {
 	case isNotFound(err):
+		consistency, why, err := r.effectiveConsistency(ctx, commit, box)
+		if err != nil {
+			return "", false, err
+		}
+		// The freeze path never runs the flush: syncfs on a frozen filesystem
+		// blocks until it thaws, and the helper syncs before it freezes.
+		if consistency == devpilotv1alpha1.ConsistencyFreeze {
+			return r.snapshotFrozen(ctx, commit, box, pod, class, why)
+		}
 		if err := r.flushRootDisk(ctx, pod); err != nil {
 			_ = r.failCommit(ctx, commit, "FlushFailed",
 				fmt.Errorf("flush the root disk of %s before snapshotting: %w", box.Name, err))

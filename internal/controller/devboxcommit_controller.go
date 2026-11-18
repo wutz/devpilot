@@ -54,8 +54,20 @@ type DevBoxCommitReconciler struct {
 	// Flusher pushes a running DevBox's page cache to its root disk before an
 	// online snapshot. Nil means no flush; production wires the exec one.
 	Flusher RootDiskFlusher
+	// Freezer freezes a running DevBox's root disk around an online snapshot
+	// when the effective consistency is Freeze. Nil fails such commits;
+	// production wires the exec one.
+	Freezer RootDiskFreezer
 	// Recorder publishes warning Events such as large model cache detection.
 	Recorder events.EventRecorder
+
+	// snapshotCut reports whether the CSI driver has cut the snapshot, which
+	// is the moment the freeze may end. Nil polls the API server; tests
+	// replace it because envtest runs no snapshot controller.
+	snapshotCut func(ctx context.Context, key types.NamespacedName) (bool, error)
+	// cutPollInterval spaces the snapshotCut checks. Zero means
+	// defaultCutPollInterval.
+	cutPollInterval time.Duration
 }
 
 // +kubebuilder:rbac:groups=devpilot.wutz.dev,resources=devboxcommits,verbs=get;list;watch;create;update;patch;delete
@@ -69,6 +81,7 @@ type DevBoxCommitReconciler struct {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch

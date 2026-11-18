@@ -17,12 +17,17 @@ limitations under the License.
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/wutz/devpilot/internal/commit"
 	"github.com/wutz/devpilot/internal/initroot"
 )
 
@@ -172,5 +177,98 @@ func TestSplitList(t *testing.T) {
 	}
 	if splitList("  ") != nil {
 		t.Error("a blank value should produce no entries")
+	}
+}
+
+func decompressFixture(t *testing.T, name, dst string) {
+	t.Helper()
+	src, err := os.Open(filepath.Join("..", "..", "internal", "ext4", "testdata", name+".img.gz"))
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+	zr, err := gzip.NewReader(src)
+	if err != nil {
+		t.Fatalf("gunzip fixture: %v", err)
+	}
+	defer func() { _ = zr.Close() }()
+	out, err := os.Create(dst)
+	if err != nil {
+		t.Fatalf("create %s: %v", dst, err)
+	}
+	if _, err := io.Copy(out, zr); err != nil {
+		_ = out.Close()
+		t.Fatalf("copy %s: %v", dst, err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("close %s: %v", dst, err)
+	}
+}
+
+func TestOpenCommitInputSelectsDiskImg(t *testing.T) {
+	root := t.TempDir()
+	decompressFixture(t, "clean", filepath.Join(root, diskImageFile))
+
+	input, closeFn, err := openCommitInput(root, "", nil)
+	if err != nil {
+		t.Fatalf("openCommitInput: %v", err)
+	}
+	defer closeFn()
+
+	extSrc, ok := input.source.(*commit.Ext4Source)
+	if !ok || extSrc.Img == nil {
+		t.Fatalf("expected *commit.Ext4Source, got %T", input.source)
+	}
+	if extSrc.Root != initroot.UpperDir {
+		t.Errorf("Ext4Source.Root = %q, want %q", extSrc.Root, initroot.UpperDir)
+	}
+	if input.upperDir != "" {
+		t.Errorf("upperDir = %q, want empty when using disk.img", input.upperDir)
+	}
+	if !errors.Is(input.metaErr, fs.ErrNotExist) {
+		t.Errorf("expected fs.ErrNotExist for absent .meta/base-image.json in fixture, got %v", input.metaErr)
+	}
+	if input.opaqueErr != nil || len(input.opaque) != 0 {
+		t.Errorf("opaque = %v, err = %v; want nil, nil", input.opaque, input.opaqueErr)
+	}
+
+	// Missing base pin still falls back cleanly to explicit flags.
+	image, digest := testBaseRef, "sha256:4444"
+	if err := resolveBaseMeta(input.meta, input.metaErr, &image, &digest); err != nil {
+		t.Fatalf("resolveBaseMeta fallback: %v", err)
+	}
+}
+
+func TestOpenCommitInputPrefersUpperDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, initroot.UpperDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Even if a stray disk.img exists, an existing upper/ directory takes precedence.
+	if err := os.WriteFile(filepath.Join(root, diskImageFile), []byte("not-an-ext4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	input, closeFn, err := openCommitInput(root, "", nil)
+	if err != nil {
+		t.Fatalf("openCommitInput: %v", err)
+	}
+	defer closeFn()
+
+	if input.source != nil {
+		t.Fatalf("expected nil Source when upper/ exists, got %T", input.source)
+	}
+	if input.upperDir != filepath.Join(root, initroot.UpperDir) {
+		t.Errorf("upperDir = %q, want %s", input.upperDir, filepath.Join(root, initroot.UpperDir))
+	}
+}
+
+func TestOpenCommitInputRejectsCorruptDiskImg(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, diskImageFile), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := openCommitInput(root, "", nil); err == nil {
+		t.Fatal("expected error for corrupt disk.img")
 	}
 }

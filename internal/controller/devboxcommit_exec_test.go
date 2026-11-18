@@ -17,7 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // The flush runs inside the container's own mount namespace, after devpilot-init
@@ -37,5 +42,61 @@ func TestFlushCommandUsesTheRunningHelper(t *testing.T) {
 	}
 	if argv[1] != "--flush" {
 		t.Errorf("flushCommand()[1] = %q, want --flush", argv[1])
+	}
+}
+
+func TestFreezeCommandPassesTheHelperTimeout(t *testing.T) {
+	argv := freezeCommand(40 * time.Second)
+	want := []string{selfExePath, "--freeze", "--freeze-timeout=40s"}
+	if strings.Join(argv, " ") != strings.Join(want, " ") {
+		t.Errorf("freezeCommand() = %v, want %v", argv, want)
+	}
+	if got := thawCommand(); strings.Join(got, " ") != selfExePath+" --thaw" {
+		t.Errorf("thawCommand() = %v", got)
+	}
+}
+
+func TestNewExecFreezerOutlivesTheWindow(t *testing.T) {
+	f := NewExecFreezer(nil, 30*time.Second)
+	if f.HelperTimeout <= 30*time.Second {
+		t.Errorf("HelperTimeout = %s, want more than the 30s window so the controller releases first", f.HelperTimeout)
+	}
+}
+
+func TestLineWatcherSignalsTheFrozenLine(t *testing.T) {
+	w := newLineWatcher(frozenLine)
+	// The line may arrive split across writes, after other output.
+	for _, chunk := range []string{"devpilot-init: starting\nfro", "zen", "\nthawed\n"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-w.seen:
+	default:
+		t.Fatal("the frozen line was not detected")
+	}
+	if !strings.Contains(w.String(), "thawed") {
+		t.Errorf("String() = %q, want the full tail", w.String())
+	}
+}
+
+func TestLineWatcherIgnoresPartialMatches(t *testing.T) {
+	w := newLineWatcher(frozenLine)
+	_, _ = w.Write([]byte("not frozen\nfrozenish\nfrozen"))
+	select {
+	case <-w.seen:
+		t.Fatal("a line that is not exactly \"frozen\" or lacks its newline was accepted")
+	default:
+	}
+}
+
+func TestExecFreezerRequiresConfig(t *testing.T) {
+	var f *ExecFreezer
+	if _, err := f.Freeze(context.Background(), &corev1.Pod{}); err == nil {
+		t.Error("Freeze() without a rest config succeeded")
+	}
+	if err := (&ExecFreezer{}).Thaw(context.Background(), &corev1.Pod{}); err == nil {
+		t.Error("Thaw() without a rest config succeeded")
 	}
 }

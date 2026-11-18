@@ -56,6 +56,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- range $sc, $snap := .Values.defaults.snapshotClassByStorageClass -}}
 {{- $pairs = append $pairs (printf "%s=%s" $sc $snap) -}}
 {{- end -}}
+{{- if and .Values.loopCSI.enabled .Values.loopCSI.snapshotClass.create -}}
+{{- range .Values.loopCSI.storageClasses -}}
+{{- if not (hasKey $.Values.defaults.snapshotClassByStorageClass .name) -}}
+{{- $pairs = append $pairs (printf "%s=%s" .name $.Values.loopCSI.snapshotClass.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- join "," $pairs -}}
 {{- end }}
 

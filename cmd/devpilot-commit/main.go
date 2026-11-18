@@ -29,9 +29,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -41,11 +45,16 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	"github.com/wutz/devpilot/internal/commit"
+	"github.com/wutz/devpilot/internal/ext4"
 	"github.com/wutz/devpilot/internal/initroot"
 )
 
-// defaultResultFile is where a Job's pod termination message is read from.
-const defaultResultFile = "/dev/termination-log"
+const (
+	// defaultResultFile is where a Job's pod termination message is read from.
+	defaultResultFile = "/dev/termination-log"
+	// diskImageFile is the loop-backed ext4 root disk filename on shared storage.
+	diskImageFile = "disk.img"
+)
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -66,8 +75,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		_, _ = fmt.Fprintf(stderr, "devpilot-commit: %s\n", line)
 	}
 
-	fs := flag.NewFlagSet("devpilot-commit", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	flags := flag.NewFlagSet("devpilot-commit", flag.ContinueOnError)
+	flags.SetOutput(stderr)
 
 	var (
 		rootDisk     string
@@ -93,55 +102,63 @@ func run(args []string, stdout, stderr *os.File) int {
 		dryRun       bool
 		chunkSize    int64
 	)
-	fs.StringVar(&rootDisk, "rootdisk", initroot.DefaultRootDisk,
-		"Mount point of the root disk PVC; upper/ and .meta/ are read from here.")
-	fs.StringVar(&upperDir, "upper", "",
+	flags.StringVar(&rootDisk, "rootdisk", initroot.DefaultRootDisk,
+		"Mount point of the root disk PVC; upper/ and .meta/ (or disk.img) are read from here.")
+	flags.StringVar(&upperDir, "upper", "",
 		"Scan this directory instead of <rootdisk>/upper; used for a snapshot clone.")
-	fs.StringVar(&baseImage, "base-image", "",
+	flags.StringVar(&baseImage, "base-image", "",
 		"Base image reference; defaults to the one recorded in .meta/base-image.json.")
-	fs.StringVar(&baseDigest, "base-digest", "",
+	flags.StringVar(&baseDigest, "base-digest", "",
 		"Base image digest; defaults to the one recorded in .meta/base-image.json.")
-	fs.StringVar(&repository, "repository", "",
+	flags.StringVar(&repository, "repository", "",
 		"Destination repository without a tag, for example registry.example.com/library/devbox.")
-	fs.StringVar(&tags, "tags", "",
+	flags.StringVar(&tags, "tags", "",
 		"Comma separated tags to push.")
-	fs.StringVar(&compression, "compression", commit.CompressionZstd,
+	flags.StringVar(&compression, "compression", commit.CompressionZstd,
 		"Layer compression: zstd, zstd:chunked, or gzip. A docker base image accepts gzip only.")
-	fs.StringVar(&excludes, "exclude", "",
+	flags.StringVar(&excludes, "exclude", "",
 		"Comma separated extra globs to skip, relative to the layer root.")
-	fs.BoolVar(&cleanCache, "clean-package-cache", true,
+	flags.BoolVar(&cleanCache, "clean-package-cache", true,
 		"Strip apt archives and pip, uv and npm caches from the layer.")
-	fs.StringVar(&scratchDir, "scratch-dir", os.Getenv("TMPDIR"),
+	flags.StringVar(&scratchDir, "scratch-dir", os.Getenv("TMPDIR"),
 		"Directory for the staged layer blob; defaults to the system temp dir.")
-	fs.StringVar(&username, "username", os.Getenv("DEVPILOT_REGISTRY_USERNAME"),
+	flags.StringVar(&username, "username", os.Getenv("DEVPILOT_REGISTRY_USERNAME"),
 		"Registry username; falls back to the image pull secret keychain.")
-	fs.StringVar(&password, "password", os.Getenv("DEVPILOT_REGISTRY_PASSWORD"),
+	flags.StringVar(&password, "password", os.Getenv("DEVPILOT_REGISTRY_PASSWORD"),
 		"Registry password; prefer --password-file or the environment.")
-	fs.StringVar(&passwordFile, "password-file", "",
+	flags.StringVar(&passwordFile, "password-file", "",
 		"Read the registry password from this file. A mounted secret avoids a password on the command line.")
-	fs.BoolVar(&plainHTTP, "plain-http", false,
+	flags.BoolVar(&plainHTTP, "plain-http", false,
 		"Talk to the registry over plain HTTP; for a local test registry.")
-	fs.StringVar(&author, "author", "", "Set the image config author.")
-	fs.StringVar(&comment, "comment", "", "Set the commit message recorded in the image history.")
-	fs.StringVar(&envPairs, "env", "",
+	flags.StringVar(&author, "author", "", "Set the image config author.")
+	flags.StringVar(&comment, "comment", "", "Set the commit message recorded in the image history.")
+	flags.StringVar(&envPairs, "env", "",
 		"Comma separated NAME=VALUE entries to set in the image config.")
-	fs.StringVar(&workingDir, "working-dir", "", "Replace the image config working directory.")
-	fs.StringVar(&cmdLine, "cmd", "",
+	flags.StringVar(&workingDir, "working-dir", "", "Replace the image config working directory.")
+	flags.StringVar(&cmdLine, "cmd", "",
 		"Replace the image config CMD; a shell quoted string, parsed like a Dockerfile CMD.")
-	fs.StringVar(&resultFile, "result-file", defaultResultFile,
+	flags.StringVar(&resultFile, "result-file", defaultResultFile,
 		"Write the JSON result here; the kubelet surfaces it as the pod termination message.")
-	fs.BoolVar(&dryRun, "dry-run", false,
+	flags.BoolVar(&dryRun, "dry-run", false,
 		"Stage the layer and report it without pushing anything.")
-	fs.Int64Var(&chunkSize, "upload-chunk-size", commit.ChunkSize,
+	flags.Int64Var(&chunkSize, "upload-chunk-size", commit.ChunkSize,
 		"Bytes per registry upload request. The layer is sent in chunks this size and "+
 			"resumed from the last acknowledged byte when one fails, so a proxy timeout "+
 			"costs one chunk instead of the whole layer. 0 sends it in one request.")
 
-	if err := fs.Parse(args); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 
-	if err := resolveBase(rootDisk, &baseImage, &baseDigest); err != nil {
+	input, closeInput, err := openCommitInput(rootDisk, upperDir, logf)
+	if err != nil {
+		logf("Could not open the root disk", "err", err.Error())
+		writeResult(stderr, resultFile, map[string]any{"error": err.Error()})
+		return 1
+	}
+	defer closeInput()
+
+	if err := resolveBaseMeta(input.meta, input.metaErr, &baseImage, &baseDigest); err != nil {
 		logf("Could not determine the base image", "err", err.Error())
 		return 1
 	}
@@ -155,17 +172,13 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	if upperDir == "" {
-		upperDir = filepath.Join(rootDisk, initroot.UpperDir)
-	}
-	opaque, err := initroot.ReadOpaqueIndex(rootDisk)
-	if err != nil {
+	if input.opaqueErr != nil {
 		// The snapshot is an optimisation for the common case; an unreadable one
 		// must not fail a commit that would otherwise be correct.
-		logf("Could not read the opaque directory snapshot", "err", err.Error())
+		logf("Could not read the opaque directory snapshot", "err", input.opaqueErr.Error())
 	}
-	if len(opaque) > 0 {
-		logf("Read opaque directories", "count", len(opaque))
+	if len(input.opaque) > 0 {
+		logf("Read opaque directories", "count", len(input.opaque))
 	}
 
 	changes, err := buildChanges(author, comment, envPairs, workingDir, cmdLine)
@@ -205,8 +218,9 @@ func run(args []string, stdout, stderr *os.File) int {
 		BaseDigest:        baseDigest,
 		Repository:        repository,
 		Tags:              destinationTags,
-		UpperDir:          upperDir,
-		OpaqueDirs:        opaque,
+		UpperDir:          input.upperDir,
+		Source:            input.source,
+		OpaqueDirs:        input.opaque,
 		ExcludePaths:      splitList(excludes),
 		CleanPackageCache: cleanCache,
 		Compression:       compression,
@@ -252,11 +266,113 @@ func run(args []string, stdout, stderr *os.File) int {
 	return 0
 }
 
+type commitInput struct {
+	upperDir  string
+	source    commit.Source
+	meta      *initroot.BaseImageMeta
+	metaErr   error
+	opaque    []string
+	opaqueErr error
+}
+
+// openCommitInput picks either the mounted directory tree (<rootdisk>/upper)
+// or, when that is absent and <rootdisk>/disk.img exists, a read-only userspace
+// ext4 parser over disk.img so unprivileged build pods need no loop device.
+func openCommitInput(rootDisk, upperDir string, logf func(string, ...any)) (*commitInput, func(), error) {
+	noop := func() {}
+	if upperDir == "" {
+		defaultUpper := filepath.Join(rootDisk, initroot.UpperDir)
+		if _, err := os.Stat(defaultUpper); errors.Is(err, fs.ErrNotExist) {
+			diskPath := filepath.Join(rootDisk, diskImageFile)
+			if _, diskErr := os.Stat(diskPath); diskErr == nil {
+				img, err := ext4.OpenFile(diskPath)
+				if err != nil {
+					return nil, noop, fmt.Errorf("open %s: %w", diskPath, err)
+				}
+				if logf != nil {
+					logf("Opened ext4 root disk image",
+						"path", diskPath,
+						"needs-recovery", img.NeedsRecovery(),
+						"replayed", img.Replayed())
+					for _, w := range img.Warnings() {
+						logf("ext4 image warning", "path", diskPath, "warning", w)
+					}
+				}
+				meta, metaErr := readExt4BaseImageMeta(img)
+				opaque, opaqueErr := readExt4OpaqueIndex(img)
+				return &commitInput{
+					source:    &commit.Ext4Source{Img: img, Root: initroot.UpperDir},
+					meta:      meta,
+					metaErr:   metaErr,
+					opaque:    opaque,
+					opaqueErr: opaqueErr,
+				}, func() { _ = img.Close() }, nil
+			}
+		}
+		upperDir = defaultUpper
+	}
+
+	meta, metaErr := initroot.ReadBaseImageMeta(rootDisk)
+	opaque, opaqueErr := initroot.ReadOpaqueIndex(rootDisk)
+	return &commitInput{
+		upperDir:  upperDir,
+		meta:      meta,
+		metaErr:   metaErr,
+		opaque:    opaque,
+		opaqueErr: opaqueErr,
+	}, noop, nil
+}
+
+func readExt4BaseImageMeta(img *ext4.Image) (*initroot.BaseImageMeta, error) {
+	var meta initroot.BaseImageMeta
+	rel := path.Join(initroot.MetaDir, initroot.BaseImageFile)
+	if err := readExt4JSON(img, rel, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+func readExt4OpaqueIndex(img *ext4.Image) ([]string, error) {
+	var dirs []string
+	rel := path.Join(initroot.MetaDir, initroot.OpaqueIndexFile)
+	err := readExt4JSON(img, rel, &dirs)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dirs, nil
+}
+
+func readExt4JSON(img *ext4.Image, rel string, out any) error {
+	ino, err := img.Lookup(rel)
+	if err != nil {
+		return err
+	}
+	sr, err := img.OpenSection(ino)
+	if err != nil {
+		return err
+	}
+	data, err := io.ReadAll(sr)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("parse %s: %w", rel, err)
+	}
+	return nil
+}
+
 // resolveBase prefers the digest recorded in .meta/base-image.json. That file is
 // what the devbox actually booted from, so it stays correct after a rebase
 // changed the reference; a flag only fills the gap when the file is absent.
 func resolveBase(rootDisk string, image, digest *string) error {
 	meta, err := initroot.ReadBaseImageMeta(rootDisk)
+	return resolveBaseMeta(meta, err, image, digest)
+}
+
+func resolveBaseMeta(meta *initroot.BaseImageMeta, err error, image, digest *string) error {
 	switch {
 	case err == nil:
 		if meta.ImageRef != "" {
@@ -265,7 +381,7 @@ func resolveBase(rootDisk string, image, digest *string) error {
 		if meta.ImageDigest != "" {
 			*digest = meta.ImageDigest
 		}
-	case !os.IsNotExist(err):
+	case !errors.Is(err, fs.ErrNotExist):
 		// A corrupt pin is worth reporting but not fatal: the explicit flags
 		// still describe a usable base.
 		if *image == "" {
@@ -425,14 +541,14 @@ func registryOptions(username, password string) ([]remote.Option, error) {
 }
 
 // writeResult stores the JSON summary for the operator to read back.
-func writeResult(stderr *os.File, path string, payload map[string]any) {
+func writeResult(stderr *os.File, resultPath string, payload map[string]any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "devpilot-commit: Could not encode the result: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		_, _ = fmt.Fprintf(stderr, "devpilot-commit: Could not write %s: %v\n", path, err)
+	if err := os.WriteFile(resultPath, append(data, '\n'), 0o644); err != nil {
+		_, _ = fmt.Fprintf(stderr, "devpilot-commit: Could not write %s: %v\n", resultPath, err)
 	}
 }
 

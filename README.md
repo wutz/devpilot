@@ -39,39 +39,6 @@ DevBox (devpilot.wutz.dev/v1alpha1)                DevBoxCommit (devpilot.wutz.d
 | 开关机与抢占 | 关机删 Pod 释放 GPU/CPU/内存；抢占驱逐转入 `Interrupted` 保留系统盘与共享盘；连续关机/中断超期（默认 15 天）自动回收 | 对齐 `ai-prd` 容器实例抢占语义与 `trainpilot` 计费段模型 |
 | 在线/离线保存镜像 | 离线直读 PVC；在线通过 CSI `VolumeSnapshot` 秒级 COW 快照克隆临时只读卷，不中断 GPU 训练进程；支持可选 Rebase 清空 `upper/` | `csi-rbdplugin-snapclass`、`vast-snapshot-cs`、可选 `devpilot-loop-snapclass`、Harbor `project-registry` |
 | 开发环境接入 | 容器内同命名空间 `sshd`（VS Code / Cursor Remote-SSH 直通完整 rootfs 与 GPU）+ JupyterLab / WebIDE 路由 | `sshgateway` (`SSHRoute`)、Gateway API / Ingress (`:7443`) |
-| 内置控制台 | 管理器同进程托管静态看板：实例卡片、状态流转、开关机、保存镜像、计费明细；每个请求都带调用者自己的 Bearer Token，看板不持有任何独立权限 | Chart `dashboard.enabled`、`--dashboard-bind-address` |
-
-## 内置 Web 控制台
-
-控制台随管理器一起编译，静态资源通过 `go:embed` 打进镜像，默认关闭。开启后浏览器里的每个请求都把用户填写的 Bearer Token 转发给 API Server，因此**看板能做什么完全由调用者的 RBAC 决定**：只有 `devpilot-member-view` 的人只能看，有 `devpilot-member-edit` 的人才能开关机和发起固化。
-
-```bash
-helm upgrade --install devpilot oci://ghcr.io/wutz/charts/devpilot \
-  --namespace devpilot-system --set dashboard.enabled=true
-kubectl -n devpilot-system port-forward svc/devpilot-dashboard 8082:8082
-```
-
-`dashboard.bindAddress`（默认 `:8082`）同时决定监听端口与 Service 的 `targetPort`；置空但 `enabled: true` 会直接渲染失败，避免 Service 指向一个从未监听的端口。控制台本身不校验 token 是谁，只校验有没有传，所以对外暴露时务必套一层认证（Ingress + OIDC 过滤器等），而不是裸放 `LoadBalancer`。
-
-### 取 Token
-
-安装后 `helm` 的 NOTES 会打印端口转发命令和获取 Token 的命令。页面顶部的「怎么拿？」按钮弹出同样的命令，「复制命令」可以一键复制。把命令输出的字符串粘贴到 Bearer Token 输入框，点击「刷新」后，页面会显示这个 Token 的身份、过期时间，以及它在所选命名空间里能否查看、开关机、保存镜像。
-
-默认给出的是 ServiceAccount 的 Token 命令：
-
-```bash
-kubectl -n <namespace> create token <serviceaccount> --duration=1h
-```
-
-这种 Token 带的是 ServiceAccount 的权限，不是你本人的。集群用 OIDC 登录时，请把你们的登录命令配进 `dashboard.tokenCommand`，这样拿到的就是你自己的 Token。`{namespace}` 会替换成页面里当前的命名空间，不需要时可以省略：
-
-```bash
-helm upgrade --install devpilot oci://ghcr.io/wutz/charts/devpilot \
-  --namespace devpilot-system --set dashboard.enabled=true \
-  --set-string 'dashboard.tokenCommand=<你的登录命令> --namespace {namespace}'
-```
-
-直接运行管理器时对应的参数是 `--dashboard-token-command`。
 
 ## 文档目录
 

@@ -55,12 +55,6 @@ spec:
             - --prewarm-namespace={{ . }}
             {{- end }}
             - --prepull-threshold={{ .Values.prepull.threshold }}
-            {{- if .Values.dashboard.enabled }}
-            - --dashboard-bind-address={{ .Values.dashboard.bindAddress }}
-            {{- with .Values.dashboard.tokenCommand }}
-            - {{ printf "--dashboard-token-command=%s" . | quote }}
-            {{- end }}
-            {{- end }}
             {{- if .Values.webhook.enabled }}
             - --webhook-port={{ .Values.webhook.port }}
             - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
@@ -88,11 +82,6 @@ spec:
             {{- if .Values.webhook.enabled }}
             - containerPort: {{ .Values.webhook.port }}
               name: webhook
-              protocol: TCP
-            {{- end }}
-            {{- if .Values.dashboard.enabled }}
-            - containerPort: {{ include "devpilot.dashboardPort" . }}
-              name: console
               protocol: TCP
             {{- end }}
           securityContext:

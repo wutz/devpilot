@@ -1,0 +1,62 @@
+# 单机多卡交互式模型微调（LoRA / QLoRA / SFT）示例：
+# - 申请 4 张 GPU、Guaranteed QoS 内存与大比例 /dev/shm（shmRatio: "0.5"），保障 PyTorch DataLoader 与 NCCL 通信
+# - 底座权重（只读）与微调数据集/Checkpoint（读写）全部放在共享 PVC，避免大权重落入系统盘触发镜像膨胀
+# - 将 HF_HOME / TORCH_HOME 环境变量重定向到共享缓存目录
+# - 开启 SSH + JupyterLab + TensorBoard，支持在不中断微调的情况下通过 DevBoxCommit 在线固化环境
+apiVersion: devpilot.wutz.dev/v1alpha1
+kind: DevBox
+metadata:
+  name: llm-finetune-4gpu
+  namespace: default
+spec:
+  displayName: "4卡单机交互式微调开发机 (LoRA/SFT)"
+  desiredState: Running
+  image: nvcr.io/nvidia/pytorch:25.08-py3
+  env:
+    - name: HF_HOME
+      value: /workspace/cache/huggingface
+    - name: TORCH_HOME
+      value: /workspace/cache/torch
+    - name: NCCL_DEBUG
+      value: WARN
+  resources:
+    gpus: 4
+    gpuModel: rtx-5090
+    cpu: "32"
+    memory: 128Gi
+    shmRatio: "0.5"
+  rootDisk:
+    size: 100Gi
+    storageClassName: block-nvme
+    volumeSnapshotClassName: csi-rbdplugin-snapclass
+    retentionDaysAfterStop: 15
+  volumes:
+    - name: base-models
+      persistentVolumeClaim:
+        claimName: shared-models
+      mountPath: /models
+      readOnly: true
+    - name: finetune-workspace
+      persistentVolumeClaim:
+        claimName: team-finetune-workspace
+      mountPath: /workspace
+      readOnly: false
+  access:
+    ssh:
+      enabled: true
+      username: root
+      authorizedKeys:
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...ExampleKey== developer@workstation"
+    jupyter:
+      enabled: true
+      port: 8888
+    ports:
+      - name: tensorboard
+        port: 6006
+        protocol: HTTP
+  scheduling:
+    stickyNodeAffinity: true
+    prepull: Auto
+  lifecycle:
+    idleShutdownMinutes: 0
+    maxRuntimeHours: 0

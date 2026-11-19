@@ -1,0 +1,60 @@
+# 推理服务与多端口调试示例：
+# - 挂载只读模型权重共享盘（不会被 DevBoxCommit 捕获）
+# - 同时暴露 HTTP（Web UI / TensorBoard）与 gRPC（Triton / vLLM gRPC）端口
+# - 结合可用区（zone）、抢占模式（preemptible）、污点容忍与闲置自动关机提高资源利用率
+apiVersion: devpilot.wutz.dev/v1alpha1
+kind: DevBox
+metadata:
+  name: llm-inference-dev
+  namespace: default
+spec:
+  displayName: "大模型推理与多端口调试机"
+  desiredState: Running
+  preemptible: true
+  image: nvcr.io/nvidia/pytorch:25.08-py3
+  zone: cn-east-1a
+  env:
+    - name: HF_HOME
+      value: /models/huggingface
+  resources:
+    gpus: 1
+    gpuModel: rtx-5090
+    cpu: "12"
+    memory: 48Gi
+    shmRatio: "0.5"
+  rootDisk:
+    size: 100Gi
+    storageClassName: block-nvme
+    volumeSnapshotClassName: csi-rbdplugin-snapclass
+    retentionDaysAfterStop: 7
+  volumes:
+    - name: model-weights
+      persistentVolumeClaim:
+        claimName: shared-models
+      mountPath: /models
+      readOnly: true
+  access:
+    ssh:
+      enabled: true
+      username: root
+      authorizedKeys:
+        - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...ExampleKey== developer@workstation"
+    jupyter:
+      enabled: true
+      port: 8888
+    ports:
+      - name: webui
+        port: 7860
+        protocol: HTTP
+      - name: triton-grpc
+        port: 8001
+        protocol: GRPC
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  scheduling:
+    stickyNodeAffinity: true
+    prepull: Auto
+  lifecycle:
+    idleShutdownMinutes: 45

@@ -136,7 +136,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 		_, err := reconcileOnce(r, key)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("pre-creating the rootdisk PVC and Service without creating a Pod or billing segment")
+		By("pre-creating the rootdisk PVC and Service without creating a Pod or usage segment")
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name + RootDiskPVCSuffix}, &corev1.PersistentVolumeClaim{})).To(Succeed())
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name}, &corev1.Service{})).To(Succeed())
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: box.Name + PodSuffix}, &corev1.Pod{})).NotTo(Succeed())

@@ -1,7 +1,7 @@
 # 推理服务与多端口调试示例：
 # - 挂载只读模型权重共享盘（不会被 DevBoxCommit 捕获）
 # - 同时暴露 HTTP（Web UI / TensorBoard）与 gRPC（Triton / vLLM gRPC）端口
-# - 结合可用区（zone）、污点容忍与闲置自动关机控制 Spot 成本
+# - 结合可用区（zone）、抢占模式（preemptible）、污点容忍与闲置自动关机提高资源利用率
 apiVersion: devpilot.wutz.dev/v1alpha1
 kind: DevBox
 metadata:
@@ -10,8 +10,7 @@ metadata:
 spec:
   displayName: "大模型推理与多端口调试机"
   desiredState: Running
-  billingMode: Spot
-  pricePerHour: "3.20"
+  preemptible: true
   image: nvcr.io/nvidia/pytorch:25.08-py3
   zone: cn-east-1a
   env:

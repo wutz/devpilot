@@ -8,7 +8,6 @@ metadata:
 spec:
   displayName: "CPU 预处理与调试开发机"
   desiredState: Stopped
-  billingMode: OnDemand
   image: ubuntu:24.04
   env:
     - name: PIP_INDEX_URL

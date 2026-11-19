@@ -42,7 +42,7 @@ DevBox (devpilot.wutz.dev/v1alpha1)                DevBoxCommit (devpilot.wutz.d
 
 ## 文档目录
 
-- [用户使用指南与场景示例](docs/user-guide.md) — 从用户视角出发的快速开始、常见场景（GPU/CPU/微调/共享盘/多端口/Spot/Commit & Rebase）与排查指南
+- [用户使用指南与场景示例](docs/user-guide.md) — 从用户视角出发的快速开始、常见场景（GPU/CPU/微调/共享盘/多端口/抢占/Commit & Rebase）与排查指南
 - [架构总览与方案选型](docs/architecture.md) — 方案对比、整体拓扑、关键设计决策（D1–D12）与核心工作流
 - [持久化与镜像提交机制深潜](docs/persistence-and-commit.md) — `devpilot-init` 切根细节、NVIDIA 子挂载迁移、Whiteout 转 OCI 层、CSI 热快照与 Rebase
 - [超大基础镜像加速与预热规划](docs/image-acceleration-and-prewarm.md) — 30–100 GB 镜像冷启动瓶颈拆解、节点缓存亲和、`ImagePrewarm`、Spegel P2P 与 `zstd:chunked`/Nydus 懒加载分阶段设计

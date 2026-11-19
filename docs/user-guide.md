@@ -12,7 +12,7 @@
 - [2. 快速开始](#2-快速开始)
 - [3. 常见 DevBox 规格与挂载场景](#3-常见-devbox-规格与挂载场景)
 - [4. 交互式接入（SSH / JupyterLab / HTTP 与 gRPC 端口）](#4-交互式接入ssh--jupyterlab--http-与-grpc-端口)
-- [5. 开关机、重启、重置系统盘与成本自动化](#5-开关机重启重置系统盘与成本自动化)
+- [5. 开关机、重启、重置系统盘与计量自动化](#5-开关机重启重置系统盘与计量自动化)
 - [6. 将开发环境固化为容器镜像（DevBoxCommit 与 Rebase）](#6-将开发环境固化为容器镜像devboxcommit-与-rebase)
 - [7. 大镜像启动加速与节点预热（Prepull & ImagePrewarm）](#7-大镜像启动加速与节点预热prepull--imageprewarm)
 - [8. 权限体系（RBAC）与安全提示](#8-权限体系rbac与安全提示)
@@ -25,7 +25,7 @@
 
 | 使用场景 | 核心功能点 | 示例文件 |
 | --- | --- | --- |
-| **GPU 算法开发机（主力场景）** | 单/多卡 GPU、Guaranteed QoS、共享存储 PVC、SSH 网关、JupyterLab、TensorBoard、Spot 计费 | [devbox-pytorch.yaml](../deploy/examples/devbox-pytorch.yaml) |
+| **GPU 算法开发机（主力场景）** | 单/多卡 GPU、Guaranteed QoS、共享存储 PVC、SSH 网关、JupyterLab、TensorBoard、抢占模式与运行计量 | [devbox-pytorch.yaml](../deploy/examples/devbox-pytorch.yaml) |
 | **单机多卡模型微调（LoRA / SFT）** | 多卡 GPU（如 4×/8×）、大比例 `/dev/shm`、只读底座模型 + 读写 Checkpoint 卷、`HF_HOME` 重定向、TensorBoard、训练不断线固化 | [devbox-finetune.yaml](../deploy/examples/devbox-finetune.yaml) |
 | **纯 CPU 调试机 / 按需冷创建** | `gpus: 0`、无 NVIDIA 运行时依赖、初始 `desiredState: Stopped` 预分配系统盘、闲置自动关机 | [devbox-cpu-minimal.yaml](../deploy/examples/devbox-cpu-minimal.yaml) |
 | **模型推理与多端口调试（HTTP + gRPC）** | 只读权重共享盘（`readOnly: true`）、同时暴露 HTTP 与 gRPC 服务、可用区（`zone`）与污点容忍 | [devbox-inference-grpc.yaml](../deploy/examples/devbox-inference-grpc.yaml) |
@@ -92,7 +92,7 @@ kubectl get devbox kcs-pytorch-dev -o yaml
 
 创建 `DevBox` 时若将 `spec.desiredState` 设为 `Stopped`：
 - 控制器会提前创建好根盘 PVC（`<name>-rootdisk`）、SSH HostKey Secret、Service 与 Ingress/SSHRoute 占位，确保访问地址和密钥提前固定；
-- **不会创建 Pod，不会占用 GPU/CPU 算力，也不会开启计费段**；
+- **不会创建 Pod，不会占用 GPU/CPU 算力，也不会开启计量段**；
 - 需要使用时再开机（见第 5 节）。
 
 ### 3.3 挂载共享存储（数据集 / 模型权重）
@@ -135,7 +135,7 @@ spec:
 | `access.jupyter.port` / `access.ports` | 可改 | 修改端口会同步更新 Service/Ingress 并按需重建 Pod |
 | `rootDisk.size` | **仅允许扩容** | 不可缩小，支持在线/离线向底层 CSI 扩容 |
 | `rootDisk.storageClassName` | **不可变** | 创建后禁止修改（需重置系统盘场景除外） |
-| `billingMode` | **不可变** | `OnDemand` 与 `Spot` 创建后不可互转 |
+| `preemptible` | **不可变** | 抢占模式（`true`）与非抢占模式（`false`）创建后不可互转 |
 | `spec.image` | **根盘创建后锁定** | 一旦绑定 `status.activeImageDigest`，直接修改会被拒绝，必须通过「Commit + Rebase」或「`reset-rootdisk`」切换 |
 
 ---
@@ -213,7 +213,7 @@ access:
 
 ---
 
-## 5. 开关机、重启、重置系统盘与成本自动化
+## 5. 开关机、重启、重置系统盘与计量自动化
 
 ### 5.1 两种开关机方式
 
@@ -235,7 +235,7 @@ kubectl patch devbox kcs-pytorch-dev --type=merge -p '{"spec":{"desiredState":"R
 # 关机
 kubectl annotate devbox kcs-pytorch-dev devpilot.wutz.dev/action="stop=$(date +%s)" --overwrite
 
-# 开机（也可用于从 Spot 中断态 Interrupted 恢复）
+# 开机（也可用于从抢占中断态 Interrupted 恢复）
 kubectl annotate devbox kcs-pytorch-dev devpilot.wutz.dev/action="start=$(date +%s)" --overwrite
 
 # 重启容器（删除并重建 Pod，保留全部根盘数据）
@@ -247,28 +247,28 @@ kubectl annotate devbox kcs-pytorch-dev devpilot.wutz.dev/action="reset-rootdisk
 
 > **提示**：执行 `reset-rootdisk` 会删除 `<name>-rootdisk` PVC 并清空 `status.activeImageDigest` 与 `status.lastNodeName`——这是**不通过 Commit 直接切换 `spec.image` 基础镜像**的唯一途径；在 `Running` 状态下调用会被拒绝。
 
-### 5.2 抢占式实例（`billingMode: Spot`）中断行为
+### 5.2 抢占式实例（`preemptible: true`）中断行为
 
-当 `Spot` 类型的 DevBox 所在节点发生抢占、驱逐或被标记 `node.kubernetes.io/out-of-service:NoExecute` 时：
+当 `preemptible: true` 的 DevBox 所在节点发生抢占、驱逐或被标记 `node.kubernetes.io/out-of-service:NoExecute` 时：
 1. DevBox 会立即停机并进入 `Interrupted` 状态，设置 `Preempted=True` Condition 与 Kubernetes Event。
-2. 当前计费段立刻闭合（`endReason: Preempted`），系统盘与共享盘完整保留。
-3. **控制器不会在后台盲目自动拉起抢占实例**（避免反复争抢资源或产生非预期扣费）；当你需要继续工作时，执行 `action: start` 或将 `spec.desiredState` 置为 `Running` 即可重新调度。
+2. 当前计量段立刻闭合（`endReason: Preempted`），系统盘与共享盘完整保留。
+3. **控制器不会在后台盲目自动拉起抢占实例**（避免反复争抢资源或产生非预期资源占用）；当你需要继续工作时，执行 `action: start` 或将 `spec.desiredState` 置为 `Running` 即可重新调度。
 
 ### 5.3 闲置自动关机与超期数据保留（GC）
 
 - **闲置自动关机（`spec.lifecycle.idleShutdownMinutes`）**：
-  - 设置大于 0 的分钟数后，若自开机或最近一次 `devpilot.wutz.dev/last-active` 活跃时间起超过该阈值未活跃，DevPilot 会自动将实例关机并闭合当前计费段（`endReason: IdleTimeout`）。
+  - 设置大于 0 的分钟数后，若自开机或最近一次 `devpilot.wutz.dev/last-active` 活跃时间起超过该阈值未活跃，DevPilot 会自动将实例关机并闭合当前计量段（`endReason: IdleTimeout`）。
 - **停机后保留期（`spec.rootDisk.retentionDaysAfterStop`）**：
   - 默认 `15` 天（`0` 表示永久保留不自动清理）。
   - 自实例进入 `Stopped` 或 `Interrupted` 起累计连续未运行时间（可在 `status.scheduledReleaseTime` 查看预计清理时间）；在到期前 72 小时和 24 小时发送预警（`ShutdownRetentionExpiring` Condition 与 Event）。
   - 重新开机后会清零停机计时并清除预警。
 
-### 5.4 查看运行段计费明细
+### 5.4 查看运行段计量明细
 
-DevBox 每次进入 `Running` 都会在 `status.segments[]` 中开启一条计费段，停机/中断时以定点字符串（最多 6 位小数）结算费用并累加至 `status.totalCost` 与 `status.totalBilledSeconds`（最多保留最近 256 条已闭合计费段）。
+DevBox 每次进入 `Running` 都会在 `status.segments[]` 中开启一条计量段，停机/中断时记录闭合时长并累加至 `status.totalUsageSeconds`（纯资源使用时长台账，不含价格或费用，最多保留最近 256 条已闭合计量段）。
 
 ```bash
-kubectl get devbox kcs-pytorch-dev -o jsonpath='{range .status.segments[*]}{.id}{"\t"}{.startTime}{"\t"}{.endTime}{"\t"}{.billedSeconds}s{"\t"}{.cost}{"\t"}{.endReason}{"\n"}{end}'
+kubectl get devbox kcs-pytorch-dev -o jsonpath='{range .status.segments[*]}{.id}{"\t"}{.startTime}{"\t"}{.endTime}{"\t"}{.durationSeconds}s{"\t"}{.endReason}{"\n"}{end}'
 ```
 
 ---
@@ -346,7 +346,7 @@ DevPilot 提供了两个可被多租户项目体系聚合的标准 `ClusterRole`
    - **重定向下载缓存环境变量**：在 `spec.env` 中配置 `HF_HOME=/workspace/cache/huggingface` 与 `TORCH_HOME=/workspace/cache/torch`，避免 Hugging Face / TorchHub 权重默认落入 `/root/.cache`——不仅消耗 `rootdisk`，还会在提交镜像时触发 ≥ 5 GiB 的 `LargeModelCache` 体积告警并拖慢推送。
 3. **训练不断线导出环境镜像，无缝衔接大规模训练**：
    - 调试跑通单机 4 卡/8 卡微调脚本与超参后，可直接在训练运行中提交 `consistency: Sync` 的 `DevBoxCommit`，无需停掉当前微调实验即可把最终环境固化为 OCI 镜像。
-   - 通过 `spec.access.ports` 暴露 TensorBoard（`6006/HTTP`）实时观察 Loss/梯度曲线；若使用 `billingMode: Spot` 跑长时微调，务必将 Checkpoint 定期保存到共享 PVC（`/workspace`），以便被抢占进入 `Interrupted` 后重新开机并从最新 Checkpoint 续训（`resume_from_checkpoint`）。
+   - 通过 `spec.access.ports` 暴露 TensorBoard（`6006/HTTP`）实时观察 Loss/梯度曲线；若使用 `preemptible: true` 跑长时微调，务必将 Checkpoint 定期保存到共享 PVC（`/workspace`），以便被抢占进入 `Interrupted` 后重新开机并从最新 Checkpoint 续训（`resume_from_checkpoint`）。
 
 ### 9.2 与多机分布式训练（TrainPilot）的明确边界
 

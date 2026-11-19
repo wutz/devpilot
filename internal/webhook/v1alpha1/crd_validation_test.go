@@ -118,7 +118,7 @@ var _ = Describe("CRD OpenAPI, CEL and Shipped Examples Admission", func() {
 						obj.SetName(fmt.Sprintf("%s-%d", obj.GetName(), crdTestCounter))
 					}
 
-					Expect(k8sClient.Create(ctx, obj, client.DryRunAll)).To(Succeed(),
+					Expect(k8sClient.Create(ctx, obj, client.DryRunAll, client.FieldValidation("Strict"))).To(Succeed(),
 						"manifest %s should pass CRD schema, CEL and webhooks", path)
 					validatedFiles++
 				}
@@ -154,7 +154,7 @@ var _ = Describe("CRD OpenAPI, CEL and Shipped Examples Admission", func() {
 			got := &devpilotv1alpha1.DevBox{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "defaults-box"}, got)).To(Succeed())
 			Expect(got.Spec.DesiredState).To(Equal(devpilotv1alpha1.DesiredStateRunning))
-			Expect(got.Spec.BillingMode).To(Equal(devpilotv1alpha1.BillingModeOnDemand))
+			Expect(got.Spec.Preemptible).To(BeFalse())
 			Expect(got.Spec.Resources.CPU).To(Equal(apiresource.MustParse("4")))
 			Expect(got.Spec.Resources.Memory).To(Equal(apiresource.MustParse("8Gi")))
 			Expect(got.Spec.Resources.ShmRatio).To(Equal("0.5"))
@@ -167,11 +167,6 @@ var _ = Describe("CRD OpenAPI, CEL and Shipped Examples Admission", func() {
 			envBox := newMinimalDevBox("bad-env", namespace)
 			envBox.Spec.Env = []corev1.EnvVar{{Name: "DEVPILOT_ROOT_DISK", Value: "/bad"}}
 			Expect(k8sClient.Create(ctx, envBox)).NotTo(Succeed())
-
-			By("rejecting invalid pricePerHour formats")
-			priceBox := newMinimalDevBox("bad-price", namespace)
-			priceBox.Spec.PricePerHour = "1.1234567"
-			Expect(k8sClient.Create(ctx, priceBox)).NotTo(Succeed())
 
 			By("rejecting invalid shmRatio formats")
 			shmBox := newMinimalDevBox("bad-shm", namespace)
@@ -201,10 +196,10 @@ var _ = Describe("CRD OpenAPI, CEL and Shipped Examples Admission", func() {
 			Expect(k8sClient.Create(ctx, box)).To(Succeed())
 			key := client.ObjectKeyFromObject(box)
 
-			By("rejecting billingMode mutation")
+			By("rejecting preemptible mutation")
 			updated := &devpilotv1alpha1.DevBox{}
 			Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
-			updated.Spec.BillingMode = devpilotv1alpha1.BillingModeSpot
+			updated.Spec.Preemptible = true
 			Expect(k8sClient.Update(ctx, updated)).NotTo(Succeed())
 
 			By("rejecting storageClassName mutation")

@@ -200,16 +200,6 @@ spec:
                 items:
                   type: string
                 type: array
-              billingMode:
-                default: OnDemand
-                description: billingMode is immutable after creation (ai-prd §6.2).
-                enum:
-                - OnDemand
-                - Spot
-                type: string
-                x-kubernetes-validations:
-                - message: billingMode is immutable after creation
-                  rule: self == oldSelf
               command:
                 description: |-
                   command overrides the image ENTRYPOINT/CMD. Empty inherits them; when the
@@ -422,11 +412,16 @@ spec:
                   type: string
                 description: nodeSelector is merged into the pod scheduling requirements.
                 type: object
-              pricePerHour:
-                description: pricePerHour is a fixed-point CNY amount per hour, e.g.
-                  "2.80".
-                pattern: ^[0-9]+(\.[0-9]{1,6})?$
-                type: string
+              preemptible:
+                default: false
+                description: |-
+                  preemptible marks the DevBox as running on reclaimable capacity. When
+                  true, a platform preemption or node out-of-service drain moves the
+                  DevBox to Interrupted rather than Failed. Immutable after creation.
+                type: boolean
+                x-kubernetes-validations:
+                - message: preemptible is immutable after creation
+                  rule: self == oldSelf
               resources:
                 description: resources describes the compute shape of the DevBox.
                 properties:
@@ -783,19 +778,15 @@ spec:
                 format: date-time
                 type: string
               segments:
-                description: segments is the billing ledger, newest last.
+                description: segments is the metering ledger, newest last.
                 items:
-                  description: BillingSegment is one running interval, aligned with
-                    the trainpilot ledger.
+                  description: UsageSegment is one running interval recorded for resource
+                    metering.
                   properties:
-                    billedSeconds:
-                      description: billedSeconds is the closed duration in seconds.
+                    durationSeconds:
+                      description: durationSeconds is the closed duration in seconds.
                       format: int64
                       type: integer
-                    cost:
-                      description: cost is the fixed-point amount for this segment.
-                      pattern: ^[0-9]+(\.[0-9]{1,6})?$
-                      type: string
                     endReason:
                       description: endReason closes the segment.
                       enum:
@@ -803,7 +794,6 @@ spec:
                       - IdleTimeout
                       - Preempted
                       - NodeFailure
-                      - AccountArrears
                       - Released
                       type: string
                     endTime:
@@ -818,10 +808,6 @@ spec:
                       type: integer
                     nodeName:
                       description: nodeName is the node the segment ran on.
-                      type: string
-                    pricePerHour:
-                      description: pricePerHour snapshots the price at segment start.
-                      pattern: ^[0-9]+(\.[0-9]{1,6})?$
                       type: string
                     startTime:
                       description: startTime is when the segment opened.
@@ -848,14 +834,10 @@ spec:
                 description: stoppedAt records when the devbox last entered Stopped.
                 format: date-time
                 type: string
-              totalBilledSeconds:
-                description: totalBilledSeconds aggregates closed segments.
+              totalUsageSeconds:
+                description: totalUsageSeconds aggregates closed usage segments.
                 format: int64
                 type: integer
-              totalCost:
-                description: totalCost is the fixed-point aggregate cost.
-                pattern: ^[0-9]+(\.[0-9]{1,6})?$
-                type: string
             type: object
         required:
         - spec

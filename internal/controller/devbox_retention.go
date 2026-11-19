@@ -90,11 +90,11 @@ func (r *DevBoxReconciler) shutdownIfIdle(ctx context.Context, box *devpilotv1al
 
 	// The segment closes here, while the reconcile still knows why the devbox
 	// is going down: once the pod is gone the phase is a plain Stopped, and
-	// settling the ledger there would bill the run as a user stop.
+	// settling the ledger there would record the run as a user stop.
 	closeSegment(box, now, devpilotv1alpha1.EndReasonIdleTimeout)
-	// settleBilling is skipped for this reconcile, so the total the closed
+	// settleMetering is skipped for this reconcile, so the total the closed
 	// segment contributes is derived here rather than a reconcile later.
-	box.Status.TotalCost = totalCost(box)
+	box.Status.TotalUsageSeconds = totalUsageSeconds(box)
 	message := fmt.Sprintf("No activity for %d minutes; shutting the devbox down", minutes)
 	box.Spec.DesiredState = devpilotv1alpha1.DesiredStateStopped
 	box.Status.Phase = devpilotv1alpha1.PhaseStopping
@@ -126,7 +126,7 @@ func lastActivity(box *devpilotv1alpha1.DevBox) (time.Time, bool) {
 			last, found = parsed.UTC(), true
 		}
 	}
-	if segment := openBillingSegment(box); segment != nil {
+	if segment := openUsageSegment(box); segment != nil {
 		if start := segment.StartTime.Time; !found || start.After(last) {
 			last, found = start, true
 		}
@@ -203,10 +203,11 @@ func (r *DevBoxReconciler) warnRetention(box *devpilotv1alpha1.DevBox, remaining
 func (r *DevBoxReconciler) releaseRetention(ctx context.Context, box *devpilotv1alpha1.DevBox, now time.Time) error {
 	log := logf.FromContext(ctx)
 
-	// A devbox that reached its release time without going through settleBilling
-	// still gets a closed ledger line, so an invoice run never sees a run that
-	// never ended.
+	// A devbox that reached its release time without going through settleMetering
+	// still gets a closed ledger line, so downstream metering never sees a run
+	// that never ended.
 	closeSegment(box, now, devpilotv1alpha1.EndReasonReleased)
+	box.Status.TotalUsageSeconds = totalUsageSeconds(box)
 
 	name := box.Status.RootDiskPVC
 	if name == "" {

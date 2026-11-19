@@ -41,8 +41,7 @@ const (
 func newDevBox() *devpilotv1alpha1.DevBox {
 	return &devpilotv1alpha1.DevBox{
 		Spec: devpilotv1alpha1.DevBoxSpec{
-			Image:       "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime",
-			BillingMode: devpilotv1alpha1.BillingModeOnDemand,
+			Image: "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime",
 			RootDisk: devpilotv1alpha1.RootDiskSpec{
 				Size:             apiresource.MustParse("100Gi"),
 				StorageClassName: "block-nvme",
@@ -67,13 +66,12 @@ var _ = Describe("DevBox Webhook", func() {
 	})
 
 	Context("When defaulting", func() {
-		It("fills the power state, billing mode and prepull policy", func() {
+		It("fills the power state and prepull policy", func() {
 			obj.Spec.DesiredState = ""
-			obj.Spec.BillingMode = ""
 			obj.Spec.Scheduling.Prepull = ""
 			Expect(defaulter.Default(ctx, obj)).To(Succeed())
 			Expect(obj.Spec.DesiredState).To(Equal(devpilotv1alpha1.DesiredStateRunning))
-			Expect(obj.Spec.BillingMode).To(Equal(devpilotv1alpha1.BillingModeOnDemand))
+			Expect(obj.Spec.Preemptible).To(BeFalse())
 			Expect(obj.Spec.Scheduling.Prepull).To(Equal(devpilotv1alpha1.PrepullPolicyAuto))
 		})
 
@@ -234,11 +232,11 @@ var _ = Describe("DevBox Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("rejects billingMode changes", func() {
-			obj.Spec.BillingMode = devpilotv1alpha1.BillingModeSpot
+		It("rejects preemptible changes", func() {
+			obj.Spec.Preemptible = true
 			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("billingMode is immutable"))
+			Expect(err.Error()).To(ContainSubstring("preemptible is immutable"))
 		})
 
 		It("rejects storage class changes", func() {

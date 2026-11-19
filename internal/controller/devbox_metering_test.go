@@ -34,10 +34,8 @@ import (
 )
 
 const (
-	// testSpotPrice is what the spot specs are sold at.
-	testSpotPrice = "2.80"
-	// testSpotNode is a node the specs drain to simulate a reclaim.
-	testSpotNode = "spot-node-1"
+	// testPreemptibleNode is a node the specs drain to simulate a reclaim.
+	testPreemptibleNode = "preemptible-node-1"
 )
 
 // cachedClient stands in for the informer cache: it keeps serving the DevBox
@@ -66,55 +64,12 @@ func metaCondition(box *devpilotv1alpha1.DevBox, condType string) *metav1.Condit
 	return nil
 }
 
-var _ = Describe("Billing arithmetic", func() {
-	DescribeTable("parsing an hourly price into micros",
-		func(price string, want int64, ok bool) {
-			got, parsed := parsePriceMicros(price)
-			Expect(parsed).To(Equal(ok))
-			Expect(got).To(Equal(want))
-		},
-		Entry("whole units", "3", int64(3_000_000), true),
-		Entry("two decimals", "2.80", int64(2_800_000), true),
-		Entry("one decimal", "2.8", int64(2_800_000), true),
-		Entry("six decimals", "0.000001", int64(1), true),
-		Entry("zero", "0", int64(0), true),
-		Entry("empty", "", int64(0), false),
-		Entry("too many decimals", "1.1234567", int64(0), false),
-		Entry("no whole part", ".5", int64(0), false),
-		Entry("not a number", "cheap", int64(0), false),
-	)
-
-	DescribeTable("formatting micros back into an amount",
-		func(micros int64, want string) {
-			Expect(formatAmount(micros)).To(Equal(want))
-		},
-		Entry("zero", int64(0), "0.00"),
-		Entry("negative", int64(-5), "0.00"),
-		Entry("a whole amount", int64(3_000_000), "3.00"),
-		Entry("two decimals", int64(2_800_000), "2.80"),
-		Entry("full precision", int64(1_234_567), "1.234567"),
-		Entry("a fraction of a unit", int64(1), "0.000001"),
-	)
-
-	DescribeTable("billing a duration",
-		func(price string, seconds int64, want string) {
-			Expect(segmentCost(price, seconds)).To(Equal(want))
-		},
-		Entry("a full hour", testSpotPrice, int64(3600), "2.80"),
-		Entry("half an hour", testSpotPrice, int64(1800), "1.40"),
-		Entry("a minute", "60", int64(60), "1.00"),
-		// metav1.Time keeps whole seconds, but the cost keeps the full scale so an
-		// invoice run never has to re-derive a short segment.
-		Entry("one second", "60", int64(1), "0.016666"),
-		Entry("no time", testSpotPrice, int64(0), "0.00"),
-		Entry("an unparseable price bills nothing", "", int64(3600), ""),
-	)
-
+var _ = Describe("Metering arithmetic", func() {
 	It("drops the oldest closed segments and keeps the open one", func() {
 		box := &devpilotv1alpha1.DevBox{}
-		for i := 1; i <= maxBillingSegments; i++ {
+		for i := 1; i <= maxUsageSegments; i++ {
 			end := metav1.NewTime(time.Unix(int64(i), 0))
-			box.Status.Segments = append(box.Status.Segments, devpilotv1alpha1.BillingSegment{
+			box.Status.Segments = append(box.Status.Segments, devpilotv1alpha1.UsageSegment{
 				ID:      int64(i),
 				EndTime: &end,
 			})
@@ -122,7 +77,7 @@ var _ = Describe("Billing arithmetic", func() {
 
 		openSegment(box, time.Unix(10_000, 0))
 
-		Expect(box.Status.Segments).To(HaveLen(maxBillingSegments))
+		Expect(box.Status.Segments).To(HaveLen(maxUsageSegments))
 		Expect(box.Status.Segments[0].ID).To(Equal(int64(2)), "the oldest closed segment goes first")
 		Expect(box.Status.Segments[len(box.Status.Segments)-1].EndTime).To(BeNil())
 	})
@@ -135,9 +90,22 @@ var _ = Describe("Billing arithmetic", func() {
 		Expect(box.Status.Segments).To(HaveLen(1))
 		Expect(box.Status.Segments[0].StartTime.Time.Unix()).To(Equal(int64(100)))
 	})
+
+	It("sums closed segments and clamps negative durations", func() {
+		box := &devpilotv1alpha1.DevBox{}
+		openSegment(box, time.Unix(500, 0))
+		closeSegment(box, time.Unix(400, 0), devpilotv1alpha1.EndReasonUserStopped)
+		Expect(box.Status.Segments[0].DurationSeconds).To(Equal(int64(0)))
+
+		openSegment(box, time.Unix(1000, 0))
+		closeSegment(box, time.Unix(1120, 0), devpilotv1alpha1.EndReasonUserStopped)
+		openSegment(box, time.Unix(2000, 0))
+
+		Expect(totalUsageSeconds(box)).To(Equal(int64(120)))
+	})
 })
 
-var _ = Describe("DevBox billing ledger", func() {
+var _ = Describe("DevBox metering ledger", func() {
 	var (
 		namespace string
 		recorder  *events.FakeRecorder
@@ -146,7 +114,7 @@ var _ = Describe("DevBox billing ledger", func() {
 
 	BeforeEach(func() {
 		specCounter++
-		namespace = fmt.Sprintf("billing-%d-%d", GinkgoRandomSeed(), specCounter)
+		namespace = fmt.Sprintf("metering-%d-%d", GinkgoRandomSeed(), specCounter)
 		Expect(k8sClient.Create(ctx, &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: namespace},
 		})).To(Succeed())
@@ -203,15 +171,14 @@ var _ = Describe("DevBox billing ledger", func() {
 		return key
 	}
 
-	spotBox := func(name string) *devpilotv1alpha1.DevBox {
+	preemptibleBox := func(name string) *devpilotv1alpha1.DevBox {
 		box := newTestDevBox(name, namespace)
-		box.Spec.BillingMode = devpilotv1alpha1.BillingModeSpot
-		box.Spec.PricePerHour = testSpotPrice
+		box.Spec.Preemptible = true
 		return box
 	}
 
 	It("opens a segment while the devbox runs", func() {
-		box := spotBox("running")
+		box := preemptibleBox("running")
 		key := runUntilRunning(box)
 
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
@@ -219,11 +186,10 @@ var _ = Describe("DevBox billing ledger", func() {
 		Expect(box.Status.Segments).To(HaveLen(1))
 		segment := box.Status.Segments[0]
 		Expect(segment.ID).To(Equal(int64(1)))
-		Expect(segment.PricePerHour).To(Equal(testSpotPrice))
 		Expect(segment.StartTime.IsZero()).To(BeFalse())
 		Expect(segment.EndTime).To(BeNil())
-		Expect(segment.BilledSeconds).To(BeZero())
-		Expect(segment.Cost).To(BeEmpty())
+		Expect(segment.DurationSeconds).To(BeZero())
+		Expect(box.Status.TotalUsageSeconds).To(BeZero())
 
 		By("not rewriting the ledger on an unchanged run")
 		first := box.Status.Segments[0].StartTime
@@ -234,9 +200,14 @@ var _ = Describe("DevBox billing ledger", func() {
 		Expect(box.Status.Segments[0].StartTime.Equal(&first)).To(BeTrue())
 	})
 
-	It("closes the segment when the devbox stops and opens a new one on restart", func() {
-		box := spotBox("stopped")
+	It("closes the segment when the devbox stops and aggregates totalUsageSeconds across runs", func() {
+		box := preemptibleBox("stopped")
 		key := runUntilRunning(box)
+
+		By("backdating segment start so duration is non-zero")
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		box.Status.Segments[0].StartTime = metav1.NewTime(timeNow().Add(-2 * time.Minute))
+		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
 
 		By("stopping")
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
@@ -264,9 +235,8 @@ var _ = Describe("DevBox billing ledger", func() {
 		segment := box.Status.Segments[0]
 		Expect(segment.EndTime).NotTo(BeNil())
 		Expect(segment.EndReason).To(Equal(devpilotv1alpha1.EndReasonUserStopped))
-		Expect(segment.BilledSeconds).To(BeNumerically(">=", 0))
-		Expect(segment.Cost).To(MatchRegexp(`^[0-9]+\.[0-9]{2,6}$`))
-		Expect(box.Status.TotalCost).To(Equal(segment.Cost))
+		Expect(segment.DurationSeconds).To(BeNumerically(">=", 120))
+		Expect(box.Status.TotalUsageSeconds).To(Equal(segment.DurationSeconds))
 
 		By("starting again")
 		box.Spec.DesiredState = devpilotv1alpha1.DesiredStateRunning
@@ -283,14 +253,15 @@ var _ = Describe("DevBox billing ledger", func() {
 		Expect(box.Status.Segments[1].StartTime.Before(box.Status.Segments[0].EndTime)).To(BeFalse(),
 			"the new segment starts at or after the one it follows")
 		Expect(box.Status.Segments[1].EndTime).To(BeNil())
+		Expect(box.Status.TotalUsageSeconds).To(Equal(box.Status.Segments[0].DurationSeconds))
 	})
 
-	It("interrupts a spot devbox the platform evicted and bills the segment as preempted", func() {
-		box := spotBox("preempted")
+	It("interrupts a preemptible devbox the platform evicted and closes the segment as preempted", func() {
+		box := preemptibleBox("preempted")
 		key := runUntilRunning(box)
 
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
-		box.Status.NodeName = testSpotNode
+		box.Status.NodeName = testPreemptibleNode
 		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
 
 		markPodStatus(box.Name, corev1.PodFailed, "Evicted", "The node was low on resource: ephemeral-storage.")
@@ -301,7 +272,7 @@ var _ = Describe("DevBox billing ledger", func() {
 		Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseInterrupted))
 		Expect(box.Status.InterruptedAt).NotTo(BeNil())
 		Expect(box.Status.NonRunningSince).NotTo(BeNil())
-		Expect(box.Status.Message).To(ContainSubstring("spot node was reclaimed"))
+		Expect(box.Status.Message).To(ContainSubstring("preemptible node was reclaimed"))
 		Expect(box.Status.NodeName).To(BeEmpty(), "an interrupted devbox is on no node")
 
 		By("reporting the cause without a running verdict")
@@ -317,6 +288,7 @@ var _ = Describe("DevBox billing ledger", func() {
 		Expect(box.Status.Segments).To(HaveLen(1))
 		Expect(box.Status.Segments[0].EndReason).To(Equal(devpilotv1alpha1.EndReasonPreempted))
 		Expect(box.Status.Segments[0].EndTime).NotTo(BeNil())
+		Expect(box.Status.TotalUsageSeconds).To(Equal(box.Status.Segments[0].DurationSeconds))
 
 		By("publishing an Event")
 		Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Interrupted")))
@@ -327,11 +299,11 @@ var _ = Describe("DevBox billing ledger", func() {
 		}, "10s").Should(BeTrue())
 	})
 
-	It("interrupts a spot devbox whose node was taken out of service", func() {
-		box := spotBox("drained")
+	It("interrupts a preemptible devbox whose node was taken out of service", func() {
+		box := preemptibleBox("drained")
 		key := createBound(box)
 
-		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: testSpotNode}}
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: testPreemptibleNode}}
 		node.Spec.Taints = []corev1.Taint{{
 			Key:    outOfServiceTaint,
 			Effect: corev1.TaintEffectNoExecute,
@@ -343,7 +315,7 @@ var _ = Describe("DevBox billing ledger", func() {
 
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
 		box.Status.Phase = devpilotv1alpha1.PhaseStarting
-		box.Status.NodeName = testSpotNode
+		box.Status.NodeName = testPreemptibleNode
 		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
 
 		_, err := reconcileOnce(r, key)
@@ -362,12 +334,45 @@ var _ = Describe("DevBox billing ledger", func() {
 		Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseInterrupted))
 	})
 
+	It("interrupts cleanly even if the pod vanished before the out-of-service node check", func() {
+		box := preemptibleBox("vanished-pod")
+		key := runUntilRunning(box)
+
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: testPreemptibleNode}}
+		node.Spec.Taints = []corev1.Taint{{
+			Key:    outOfServiceTaint,
+			Effect: corev1.TaintEffectNoExecute,
+		}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, node))).To(Succeed())
+		})
+
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		box.Status.NodeName = testPreemptibleNode
+		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
+
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, podKey(box.Name), pod)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, podKey(box.Name), &corev1.Pod{}))
+		}, "10s").Should(BeTrue())
+
+		_, err := reconcileOnce(r, key)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
+		Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseInterrupted))
+		Expect(box.Status.Segments).To(HaveLen(1))
+		Expect(box.Status.Segments[0].EndReason).To(Equal(devpilotv1alpha1.EndReasonPreempted))
+	})
+
 	It("restarts an interrupted devbox only when the user asks", func() {
-		box := spotBox("resume")
+		box := preemptibleBox("resume")
 		key := runUntilRunning(box)
 
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
-		box.Status.NodeName = testSpotNode
+		box.Status.NodeName = testPreemptibleNode
 		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
 		markPodStatus(box.Name, corev1.PodFailed, "Preempted", "pod was preempted")
 		_, err := reconcileOnce(r, key)
@@ -412,11 +417,11 @@ var _ = Describe("DevBox billing ledger", func() {
 	})
 
 	It("does not relaunch an interrupted devbox from a stale cached status", func() {
-		box := spotBox("stale")
+		box := preemptibleBox("stale")
 		key := runUntilRunning(box)
 
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
-		box.Status.NodeName = testSpotNode
+		box.Status.NodeName = testPreemptibleNode
 		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
 
 		// This is the running devbox as the informer cache still reports it.
@@ -443,13 +448,12 @@ var _ = Describe("DevBox billing ledger", func() {
 			"an interrupted devbox is not relaunched from a stale phase")
 	})
 
-	It("never interrupts an on-demand devbox", func() {
-		box := newTestDevBox("ondemand", namespace)
-		box.Spec.PricePerHour = testSpotPrice
+	It("never interrupts a non-preemptible devbox", func() {
+		box := newTestDevBox("nonpreemptible", namespace)
 		key := runUntilRunning(box)
 
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
-		box.Status.NodeName = testSpotNode
+		box.Status.NodeName = testPreemptibleNode
 		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
 		markPodStatus(box.Name, corev1.PodFailed, "Evicted", "The node was low on resource: memory.")
 		_, err := reconcileOnce(r, key)

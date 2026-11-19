@@ -38,10 +38,17 @@ import (
 )
 
 const (
-	scenarioImageV2  = "nvcr.io/nvidia/pytorch:25.08-py3"
-	scenarioDigestV2 = "sha256:22223333444455556666777788889999aaaabbbbccccddddeeeeffff00001111"
-	scenarioZone     = "cn-east-1a"
-	scenarioZoneOvrd = "cn-east-1b"
+	scenarioImageV2         = "nvcr.io/nvidia/pytorch:25.08-py3"
+	scenarioDigestV2        = "sha256:22223333444455556666777788889999aaaabbbbccccddddeeeeffff00001111"
+	scenarioZone            = "cn-east-1a"
+	scenarioZoneOvrd        = "cn-east-1b"
+	scenarioEnvHFHome       = "HF_HOME"
+	scenarioVolSharedData   = "shared-data"
+	scenarioVolModelWeights = "model-weights"
+	scenarioPVCSharedModels = "shared-models"
+	scenarioModelsMountPath = "/models"
+	scenarioPortTensorBoard = "tensorboard"
+	scenarioCommitQueueBox  = "commit-queue-box"
 )
 
 var _ = Describe("User Perspective Scenarios", func() {
@@ -165,9 +172,9 @@ var _ = Describe("User Perspective Scenarios", func() {
 
 	It("mounts shared PVCs into the main container and forwards custom command, env, zone, nodeSelector and tolerations", func() {
 		box := newTestDevBox("custom-mounts", namespace)
-		box.Spec.Command = []string{"python", "-m", "vllm.entrypoints.openai.api_server"}
+		box.Spec.Command = []string{testPython, "-m", "vllm.entrypoints.openai.api_server"}
 		box.Spec.Args = []string{"--port", "8000"}
-		box.Spec.Env = []corev1.EnvVar{{Name: "HF_HOME", Value: "/models/hf"}}
+		box.Spec.Env = []corev1.EnvVar{{Name: scenarioEnvHFHome, Value: "/models/hf"}}
 		box.Spec.Zone = scenarioZone
 		box.Spec.NodeSelector = map[string]string{
 			ZoneLabel:                scenarioZoneOvrd,
@@ -180,15 +187,15 @@ var _ = Describe("User Perspective Scenarios", func() {
 		}}
 		box.Spec.Volumes = []devpilotv1alpha1.DevBoxVolume{
 			{
-				Name:                  "shared-data",
+				Name:                  scenarioVolSharedData,
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-datasets"},
 				MountPath:             "/workspace/data",
 				ReadOnly:              false,
 			},
 			{
-				Name:                  "model-weights",
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared-models"},
-				MountPath:             "/models",
+				Name:                  scenarioVolModelWeights,
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: scenarioPVCSharedModels},
+				MountPath:             scenarioModelsMountPath,
 				ReadOnly:              true,
 			},
 			{
@@ -212,21 +219,21 @@ var _ = Describe("User Perspective Scenarios", func() {
 
 		By("attaching and mounting both extra PVCs with their configured ReadOnly flags")
 		Expect(pod.Spec.Volumes).To(ContainElement(Satisfy(func(v corev1.Volume) bool {
-			return v.Name == "shared-data" && v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == "team-datasets"
+			return v.Name == scenarioVolSharedData && v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == "team-datasets"
 		})))
 		Expect(pod.Spec.Volumes).To(ContainElement(Satisfy(func(v corev1.Volume) bool {
-			return v.Name == "model-weights" && v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == "shared-models"
+			return v.Name == scenarioVolModelWeights && v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == scenarioPVCSharedModels
 		})))
 
 		main := pod.Spec.Containers[0]
 		Expect(main.VolumeMounts).To(ContainElement(corev1.VolumeMount{
-			Name:      "shared-data",
+			Name:      scenarioVolSharedData,
 			MountPath: "/workspace/data",
 			ReadOnly:  false,
 		}))
 		Expect(main.VolumeMounts).To(ContainElement(corev1.VolumeMount{
-			Name:      "model-weights",
-			MountPath: "/models",
+			Name:      scenarioVolModelWeights,
+			MountPath: scenarioModelsMountPath,
 			ReadOnly:  true,
 		}))
 		Expect(main.VolumeMounts).NotTo(ContainElement(Satisfy(func(m corev1.VolumeMount) bool {
@@ -236,7 +243,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 		By("forwarding custom command, args, env, scheduling overrides and tolerations")
 		Expect(slices.Contains(main.Command, "--port")).To(BeTrue())
 		Expect(main.Command[len(main.Command)-2:]).To(Equal([]string{"--port", "8000"}))
-		Expect(main.Env).To(ContainElement(corev1.EnvVar{Name: "HF_HOME", Value: "/models/hf"}))
+		Expect(main.Env).To(ContainElement(corev1.EnvVar{Name: scenarioEnvHFHome, Value: "/models/hf"}))
 		Expect(pod.Spec.NodeSelector).To(HaveKeyWithValue(DefaultGPUNodeLabel, testGPUModelA100))
 		Expect(pod.Spec.NodeSelector).To(HaveKeyWithValue(ZoneLabel, scenarioZoneOvrd))
 		Expect(pod.Spec.NodeSelector).To(HaveKeyWithValue("accelerator.custom/gen", "blackwell"))
@@ -316,7 +323,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 		box.Spec.Access.SSH.Username = "ubuntu"
 		box.Spec.Access.Jupyter = &devpilotv1alpha1.JupyterAccess{Enabled: true, Port: 8888}
 		box.Spec.Access.Ports = []devpilotv1alpha1.DevBoxPort{
-			{Name: "tensorboard", Port: 6006, Protocol: ProtocolHTTP},
+			{Name: scenarioPortTensorBoard, Port: 6006, Protocol: ProtocolHTTP},
 			{Name: "triton", Port: 8001, Protocol: ProtocolGRPC},
 		}
 		Expect(k8sClient.Create(ctx, box)).To(Succeed())
@@ -344,7 +351,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
 		Expect(box.Status.Endpoints.SSH).To(ContainSubstring("ubuntu@"))
 		Expect(box.Status.Endpoints.Jupyter).To(HavePrefix("https://jupyter-"))
-		Expect(box.Status.Endpoints.Ports).To(HaveKeyWithValue("tensorboard", HavePrefix("https://tensorboard-")))
+		Expect(box.Status.Endpoints.Ports).To(HaveKeyWithValue(scenarioPortTensorBoard, HavePrefix("https://tensorboard-")))
 		Expect(box.Status.Endpoints.Ports).To(HaveKeyWithValue("triton", HavePrefix("grpcs://triton-")))
 	})
 
@@ -354,19 +361,19 @@ var _ = Describe("User Perspective Scenarios", func() {
 		recorder := events.NewFakeRecorder(16)
 		commitReconciler.Recorder = recorder
 
-		firstKey := newOfflineCommitWith(namespace, "commit-queue-box", func(c *devpilotv1alpha1.DevBoxCommit) {
+		firstKey := newOfflineCommitWith(namespace, scenarioCommitQueueBox, func(c *devpilotv1alpha1.DevBoxCommit) {
 			c.Spec.RebaseDevBox = true
 		})
 
 		box := &devpilotv1alpha1.DevBox{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "commit-queue-box"}, box)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: scenarioCommitQueueBox}, box)).To(Succeed())
 		box.Status.LastNodeName = "gpu-node-a"
 		Expect(k8sClient.Status().Update(ctx, box)).To(Succeed())
 
 		second := &devpilotv1alpha1.DevBoxCommit{
 			ObjectMeta: metav1.ObjectMeta{Name: "commit-2", Namespace: namespace},
 			Spec: devpilotv1alpha1.DevBoxCommitSpec{
-				DevBoxName:  "commit-queue-box",
+				DevBoxName:  scenarioCommitQueueBox,
 				Destination: devpilotv1alpha1.CommitDestination{Repository: testCommitRepository, Tags: []string{"v2"}},
 				Consistency: devpilotv1alpha1.ConsistencyOfflineOnly,
 			},
@@ -393,14 +400,14 @@ var _ = Describe("User Perspective Scenarios", func() {
 		By("completing the first commit with a >=5Gi model cache warning and rebase prewarm")
 		job := &batchv1.Job{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: buildJobName(first)}, job)).To(Succeed())
-		largeMsgBytes, marshalErr := json.Marshal(map[string]any{
-			"baseDigest":     testDigest,
-			"manifestDigest": testCommitDigest,
-			"configDigest":   testCommitDigest,
-			"diffID":         testCommitDigest,
-			"layerSize":      int64(2048),
-			"stats":          map[string]any{"modelCacheBytes": int64(6 * 1024 * 1024 * 1024)},
-			"images":         []string{testCommitRepository + ":v1"},
+		largeMsgBytes, marshalErr := json.Marshal(buildResult{
+			BaseDigest:     testDigest,
+			ManifestDigest: testCommitDigest,
+			ConfigDigest:   testCommitDigest,
+			DiffID:         testCommitDigest,
+			LayerSize:      2048,
+			Stats:          buildStats{ModelCacheBytes: 6 * 1024 * 1024 * 1024},
+			Images:         []string{testCommitRepository + ":v1"},
 		})
 		Expect(marshalErr).NotTo(HaveOccurred())
 		completeBuildJob(job, string(largeMsgBytes))
@@ -414,7 +421,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 
 		Eventually(recorder.Events).Should(Receive(ContainSubstring("LargeModelCache")))
 
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "commit-queue-box"}, box)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: scenarioCommitQueueBox}, box)).To(Succeed())
 		Expect(box.Status.PendingRebaseImage).To(Equal(testCommitRepository + ":v1"))
 
 		ipwName := prewarmPodName("commit-"+namespace, first.Name)
@@ -442,15 +449,15 @@ var _ = Describe("User Perspective Scenarios", func() {
 			ShmRatio: "0.5",
 		}
 		box.Spec.Env = []corev1.EnvVar{
-			{Name: "HF_HOME", Value: "/workspace/cache/huggingface"},
+			{Name: scenarioEnvHFHome, Value: "/workspace/cache/huggingface"},
 			{Name: "TORCH_HOME", Value: "/workspace/cache/torch"},
 			{Name: "NCCL_DEBUG", Value: "WARN"},
 		}
 		box.Spec.Volumes = []devpilotv1alpha1.DevBoxVolume{
 			{
 				Name:                  "base-models",
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared-models"},
-				MountPath:             "/models",
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: scenarioPVCSharedModels},
+				MountPath:             scenarioModelsMountPath,
 				ReadOnly:              true,
 			},
 			{
@@ -461,7 +468,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 			},
 		}
 		box.Spec.Access.Ports = []devpilotv1alpha1.DevBoxPort{
-			{Name: "tensorboard", Port: 6006, Protocol: ProtocolHTTP},
+			{Name: scenarioPortTensorBoard, Port: 6006, Protocol: ProtocolHTTP},
 		}
 		Expect(k8sClient.Create(ctx, box)).To(Succeed())
 		key := client.ObjectKeyFromObject(box)
@@ -502,7 +509,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 		By("mounting read-only base weights and writable workspace with cache redirect env vars")
 		Expect(main.VolumeMounts).To(ContainElement(corev1.VolumeMount{
 			Name:      "base-models",
-			MountPath: "/models",
+			MountPath: scenarioModelsMountPath,
 			ReadOnly:  true,
 		}))
 		Expect(main.VolumeMounts).To(ContainElement(corev1.VolumeMount{
@@ -511,7 +518,7 @@ var _ = Describe("User Perspective Scenarios", func() {
 			ReadOnly:  false,
 		}))
 		Expect(main.Env).To(ContainElements(
-			corev1.EnvVar{Name: "HF_HOME", Value: "/workspace/cache/huggingface"},
+			corev1.EnvVar{Name: scenarioEnvHFHome, Value: "/workspace/cache/huggingface"},
 			corev1.EnvVar{Name: "TORCH_HOME", Value: "/workspace/cache/torch"},
 			corev1.EnvVar{Name: "NCCL_DEBUG", Value: "WARN"},
 		))
@@ -520,6 +527,6 @@ var _ = Describe("User Perspective Scenarios", func() {
 		Expect(k8sClient.Get(ctx, key, box)).To(Succeed())
 		Expect(box.Status.Phase).To(Equal(devpilotv1alpha1.PhaseRunning))
 		Expect(box.Status.Endpoints.SSH).NotTo(BeEmpty())
-		Expect(box.Status.Endpoints.Ports).To(HaveKeyWithValue("tensorboard", HavePrefix("https://tensorboard-")))
+		Expect(box.Status.Endpoints.Ports).To(HaveKeyWithValue(scenarioPortTensorBoard, HavePrefix("https://tensorboard-")))
 	})
 })

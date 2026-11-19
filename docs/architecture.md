@@ -11,9 +11,9 @@
 ### 1.2 设计目标
 
 - **全根文件系统（Rootfs）修改关机持久化**：容器内任意目录（除显式挂载的临时内存盘与共享盘外）的新增、修改、权限变更与文件删除（whiteout）在停机或被抢占驱逐后 100% 保留。
-- **停机零算力占用与自由跨节点调度**：关机或中断后立即删除 Pod 释放 GPU/CPU/内存并停止算力计费；再次启动时无需绑定原宿主机，可在集群任意空闲 GPU 节点秒级拉起。
+- **停机零算力占用与自由跨节点调度**：关机或中断后立即删除 Pod 释放 GPU/CPU/内存并停止算力计量；再次启动时无需绑定原宿主机，可在集群任意空闲 GPU 节点秒级拉起。
 - **不耦合宿主机运行时的镜像固化（Commit & Push）**：无需在每个 GPU 节点运行挂载 `/run/containerd/containerd.sock` 的特权 DaemonSet；支持停机离线提交与运行中在线热提交（基于 CSI `VolumeSnapshot`），无需拉取几十 GB 基础镜像即可秒级流式追加新层推送到 Harbor。
-- **原生契合现有 AI 平台生态**：独立自包含运行（不强依赖外部 API Server），同时原生兼容 `sshgateway`（SSH 路由）、`workspace`（多租户项目与 Harbor 凭证）、`trainpilot`（固化后的镜像无缝投递训练任务，对齐抢占式与运行段计费语义）。
+- **原生契合现有 AI 平台生态**：独立自包含运行（不强依赖外部 API Server），同时原生兼容 `sshgateway`（SSH 路由）、`workspace`（多租户项目与 Harbor 凭证）、`trainpilot`（固化后的镜像无缝投递训练任务，对齐抢占式中断与运行段计量语义）。
 
 ### 1.3 非目标（v1）
 
@@ -52,7 +52,7 @@
 ```text
 ┌──────────────────────────────────── devpilot-system ────────────────────────────────────┐
 │  devpilot-controller-manager (Deployment, 2 replicas, leader election)                  │
-│   ├─ DevBoxReconciler      协调 Pod、rootdisk PVC、Service、SSHRoute、HTTPRoute、计费段 │
+│   ├─ DevBoxReconciler      协调 Pod、rootdisk PVC、Service、SSHRoute、HTTPRoute、计量段 │
 │   ├─ DevBoxCommitReconciler 协调 VolumeSnapshot、克隆 PVC、隔离 Commit Job、可选 Rebase │
 │   └─ WebhookServer         准入校验与默认值填充（镜像摘要解析、规格合法性、不可变字段） │
 └──────────────────┬───────────────────────────────────────────────────┬──────────────────┘
@@ -94,8 +94,8 @@
 | **D7** | 镜像提交采用 `go-containerregistry` 远端 Manifest 追加而非本地 `docker/nerdctl commit` | 无需拉取动辄 15–30 GB 的 PyTorch/CUDA 基础镜像层，仅流式上传增量 `upper/` tar 流（通常几百 MB 到数 GB）并重写几 KB 的 Manifest/Config JSON，速度快一个数量级且无需特权 | 若多次反复 Commit 且不压缩，镜像层数会递增（通过可选 `rebase` 与层数阈值提醒控制） |
 | **D8** | Commit Job 在隔离命名空间（`<ns>-build` 或 `devpilot-system`）运行 | 沿用 `imagebuild` 的安全模型：开发机用户对项目命名空间有 `pods/exec` 权限，隔离构建命名空间可确保镜像仓库 Push Secret 永不暴露给终端用户 | 跨命名空间访问快照时，由 Operator 在构建命名空间创建绑定只读快照源或临时 PVC |
 | **D9** | `sshd` 运行在切根后的主容器内部，而非独立 Sidecar 容器 | `forgeai` 现有 Sandbox 的 `sshd` Sidecar 只能看到共享 PVC，看不到主容器内的 Python 环境、GPU 和正在运行的进程；开发机的核心诉求是 VS Code Remote-SSH 直连完整开发环境 | `devpilot-init` 负责在无 `sshd` 的精简镜像中兜底或按需托管内置轻量 SSH 服务，并将 HostKey 持久化在 K8s Secret 中保证重启不触发客户端 `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED` |
-| **D10** | 显式区分 `Stopped`（主动关机）与 `Interrupted`（抢占回收）两种非运行态 | 对齐 `ai-prd` §6 规范：抢占式实例被高优任务回收时转入 `Interrupted`，保留 rootdisk PVC 与共享盘，截断计费段并记录回收原因，累计连续停机时长（默认 15 天自动清理） | 状态机比普通 Deployment 多一个终态分支 |
-| **D11** | 计费段（`status.segments[]`）与 `Money` 定点字符串模型对齐 `trainpilot` | 避免浮点数精度漂移；每次开机 `Running` 至停机/中断/释放生成一条闭合账单段，平台计费系统可直接拉取对账 | CRD Status 需限制历史段最大保留条数或归档摘要，防止超过 etcd 1.5MB 限制 |
+| **D10** | 显式区分 `Stopped`（主动关机）与 `Interrupted`（抢占回收）两种非运行态 | 抢占式实例被高优任务回收时转入 `Interrupted`，保留 rootdisk PVC 与共享盘，截断计量段并记录回收原因，累计连续停机时长（默认 15 天自动清理） | 状态机比普通 Deployment 多一个终态分支 |
+| **D11** | 纯计量运行段台账（`status.segments[]` 与 `totalUsageSeconds`），不内置价格或费用计算 | 价格策略、折扣与余额结算属于上层计费平台职责；Operator 只忠实记录每次 `Running` 至停机/中断/释放的起止时间、所在节点、时长秒数与结束原因，供外部平台消费 | CRD Status 需限制历史段最大保留条数（默认 256），防止超过 etcd 1.5MB 限制 |
 | **D12** | 生态松耦合：核心 CRD 零外部强依赖，`sshgateway` / `workspace` 通过可选开关集成 | 既可在纯净 K8s 集群一键 Helm 安装使用，也能在部署了 `workspace`、`sshgateway` 的多租户智算平台上无缝自动创建 `SSHRoute` 和复用 `project-registry` | 控制器对可选外部 CRD 采用动态发现或配置开关，避免未安装时启动失败 |
 
 ---
@@ -110,20 +110,20 @@
    - 创建专属 rootdisk PVC（`<name>-rootdisk`，`ReadWriteOnce`，带 OwnerReference 随 `DevBox` 删除而回收，或配置进回收站）；
    - 生成持久化 SSH HostKey Secret（`<name>-hostkey`，整个 `DevBox` 生命周期不变）；
    - 创建 Service、可选 `SSHRoute` 与 Gateway `HTTPRoute` / Ingress（端口 `7443`）；
-   - 创建开发机 Pod，`status.phase` 推进至 `Starting` → `Running`，开启首条计费段。
+   - 创建开发机 Pod，`status.phase` 推进至 `Starting` → `Running`，开启首条计量段。
 
 ### 5.2 主动关机与跨节点再启动
 
 1. 用户将 `spec.desiredState` 设为 `Stopped`（或触发闲置自动关机 `idleShutdownMinutes`）。
-2. `DevBoxReconciler` 将阶段置为 `Stopping`，优雅终止 Pod（默认 `terminationGracePeriodSeconds: 30` 让容器内进程落盘退出），闭合当前计费段（`endReason: UserStopped` 或 `IdleTimeout`）。
+2. `DevBoxReconciler` 将阶段置为 `Stopping`，优雅终止 Pod（默认 `terminationGracePeriodSeconds: 30` 让容器内进程落盘退出），闭合当前计量段（`endReason: UserStopped` 或 `IdleTimeout`）。
 3. Pod 删除后块存储 PVC 自动 detach，`status.phase` 变为 `Stopped`，记录 `status.stoppedAt`（启动 15 天停机保留倒计时）。
-4. 用户改回 `spec.desiredState: Running`：Operator 使用锁定的 `status.activeImageDigest` 重新创建 Pod，调度器挑选任意空闲 GPU 节点，PVC 重新挂载，`devpilot-init` 挂载 `upper/` 恢复全部环境，开启新计费段并清零连续停机计时。
+4. 用户改回 `spec.desiredState: Running`：Operator 使用锁定的 `status.activeImageDigest` 重新创建 Pod，调度器挑选任意空闲 GPU 节点，PVC 重新挂载，`devpilot-init` 挂载 `upper/` 恢复全部环境，开启新计量段并清零连续停机计时。
 
-### 5.3 抢占式实例被回收（Spot Interruption）
+### 5.3 抢占式实例被回收（Preemptible Interruption）
 
-1. 当抢占式（`billingMode: Spot`）开发机所在节点被高优任务抢占或触发驱逐（Pod 出现 Eviction / Preemption 或节点打上 draining 污点并删除 Pod）且 `spec.desiredState` 仍为 `Running` 时：
-2. Operator 不会盲目原地无限拉起，而是闭合计费段（`endReason: Preempted`），将 `spec.desiredState` 同步收敛或保持状态为 `Interrupted`，记录 `status.interruptedAt` 并发送 K8s Event。
-3. rootdisk PVC 与共享盘完整保留；用户后续手动点击启动时，若目标分区有空闲库存则恢复 `Running`，无库存则提示资源不足并继续保留 `Interrupted`。
+1. 当抢占式（`preemptible: true`）开发机所在节点被高优任务抢占或触发驱逐（Pod 出现 Eviction / Preemption 或节点打上 `node.kubernetes.io/out-of-service` 污点）且 `spec.desiredState` 仍为 `Running` 时：
+2. Operator 不会盲目原地无限拉起，而是闭合计量段（`endReason: Preempted`），保持状态为 `Interrupted`，记录 `status.interruptedAt` 并发送 `Warning Interrupted` Event（同时保留 `spec.desiredState: Running`）。
+3. rootdisk PVC 与共享盘完整保留；用户后续通过 `devpilot.wutz.dev/action: start=<ts>` 或 `restart=<ts>` 手动重启时，若集群有空闲容量则恢复 `Running`，否则停留在 `Starting` 等待调度。
 
 ### 5.4 提交环境为新镜像（Commit & Push）
 

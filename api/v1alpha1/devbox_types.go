@@ -24,10 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// AmountPattern matches the fixed-point decimal strings used by the
-// trainpilot Money model (e.g. "2.80"). Floats are never used for money.
-const AmountPattern = `^[0-9]+(\.[0-9]{1,6})?$`
-
 // DesiredState is the user-controlled power state of a DevBox.
 // +kubebuilder:validation:Enum=Running;Stopped
 type DesiredState string
@@ -35,15 +31,6 @@ type DesiredState string
 const (
 	DesiredStateRunning DesiredState = "Running"
 	DesiredStateStopped DesiredState = "Stopped"
-)
-
-// BillingMode is immutable for the lifetime of a DevBox.
-// +kubebuilder:validation:Enum=OnDemand;Spot
-type BillingMode string
-
-const (
-	BillingModeOnDemand BillingMode = "OnDemand"
-	BillingModeSpot     BillingMode = "Spot"
 )
 
 // DevBoxPhase is the high level lifecycle phase.
@@ -95,17 +82,16 @@ const (
 	PrepullPolicyNever  PrepullPolicy = "Never"
 )
 
-// SegmentEndReason closes a billing segment.
-// +kubebuilder:validation:Enum=UserStopped;IdleTimeout;Preempted;NodeFailure;AccountArrears;Released
+// SegmentEndReason closes a metering usage segment.
+// +kubebuilder:validation:Enum=UserStopped;IdleTimeout;Preempted;NodeFailure;Released
 type SegmentEndReason string
 
 const (
-	EndReasonUserStopped    SegmentEndReason = "UserStopped"
-	EndReasonIdleTimeout    SegmentEndReason = "IdleTimeout"
-	EndReasonPreempted      SegmentEndReason = "Preempted"
-	EndReasonNodeFailure    SegmentEndReason = "NodeFailure"
-	EndReasonAccountArrears SegmentEndReason = "AccountArrears"
-	EndReasonReleased       SegmentEndReason = "Released"
+	EndReasonUserStopped SegmentEndReason = "UserStopped"
+	EndReasonIdleTimeout SegmentEndReason = "IdleTimeout"
+	EndReasonPreempted   SegmentEndReason = "Preempted"
+	EndReasonNodeFailure SegmentEndReason = "NodeFailure"
+	EndReasonReleased    SegmentEndReason = "Released"
 )
 
 // DevBoxSpec defines the desired state of DevBox.
@@ -120,16 +106,13 @@ type DevBoxSpec struct {
 	// +kubebuilder:default=Running
 	DesiredState DesiredState `json:"desiredState,omitempty"`
 
-	// billingMode is immutable after creation (ai-prd §6.2).
+	// preemptible marks the DevBox as running on reclaimable capacity. When
+	// true, a platform preemption or node out-of-service drain moves the
+	// DevBox to Interrupted rather than Failed. Immutable after creation.
 	// +optional
-	// +kubebuilder:default=OnDemand
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="billingMode is immutable after creation"
-	BillingMode BillingMode `json:"billingMode,omitempty"`
-
-	// pricePerHour is a fixed-point CNY amount per hour, e.g. "2.80".
-	// +optional
-	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]{1,6})?$`
-	PricePerHour string `json:"pricePerHour,omitempty"`
+	// +kubebuilder:default=false
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="preemptible is immutable after creation"
+	Preemptible bool `json:"preemptible,omitempty"`
 
 	// image is the base image. The resolved immutable digest is pinned on first
 	// start into status.activeImageDigest.
@@ -402,8 +385,8 @@ type DevBoxEndpoint struct {
 	Ports map[string]string `json:"ports,omitempty"`
 }
 
-// BillingSegment is one running interval, aligned with the trainpilot ledger.
-type BillingSegment struct {
+// UsageSegment is one running interval recorded for resource metering.
+type UsageSegment struct {
 	// id is monotonically increasing per DevBox.
 	// +kubebuilder:validation:Minimum=1
 	ID int64 `json:"id"`
@@ -412,11 +395,6 @@ type BillingSegment struct {
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
 
-	// pricePerHour snapshots the price at segment start.
-	// +optional
-	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]{1,6})?$`
-	PricePerHour string `json:"pricePerHour,omitempty"`
-
 	// startTime is when the segment opened.
 	StartTime metav1.Time `json:"startTime"`
 
@@ -424,14 +402,9 @@ type BillingSegment struct {
 	// +optional
 	EndTime *metav1.Time `json:"endTime,omitempty"`
 
-	// billedSeconds is the closed duration in seconds.
+	// durationSeconds is the closed duration in seconds.
 	// +optional
-	BilledSeconds int64 `json:"billedSeconds,omitempty"`
-
-	// cost is the fixed-point amount for this segment.
-	// +optional
-	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]{1,6})?$`
-	Cost string `json:"cost,omitempty"`
+	DurationSeconds int64 `json:"durationSeconds,omitempty"`
 
 	// endReason closes the segment.
 	// +optional
@@ -528,19 +501,14 @@ type DevBoxStatus struct {
 	// +optional
 	ScheduledReleaseTime *metav1.Time `json:"scheduledReleaseTime,omitempty"`
 
-	// totalBilledSeconds aggregates closed segments.
+	// totalUsageSeconds aggregates closed usage segments.
 	// +optional
-	TotalBilledSeconds int64 `json:"totalBilledSeconds,omitempty"`
+	TotalUsageSeconds int64 `json:"totalUsageSeconds,omitempty"`
 
-	// totalCost is the fixed-point aggregate cost.
-	// +optional
-	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]{1,6})?$`
-	TotalCost string `json:"totalCost,omitempty"`
-
-	// segments is the billing ledger, newest last.
+	// segments is the metering ledger, newest last.
 	// +optional
 	// +kubebuilder:validation:MaxItems=256
-	Segments []BillingSegment `json:"segments,omitempty"`
+	Segments []UsageSegment `json:"segments,omitempty"`
 
 	// conditions represent the current state of the DevBox resource.
 	// +listType=map

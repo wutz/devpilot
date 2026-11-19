@@ -93,10 +93,10 @@ func (r *DevBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if handled, err := r.applyAction(ctx, box); err != nil {
 		box.Status.Phase = devpilotv1alpha1.PhaseFailed
 		box.Status.Message = err.Error()
-		r.settleBilling(box, timeNow())
+		r.settleMetering(box, timeNow())
 		return ctrl.Result{}, r.patchStatus(ctx, original, box)
 	} else if handled {
-		r.settleBilling(box, timeNow())
+		r.settleMetering(box, timeNow())
 		return ctrl.Result{}, r.patchStatus(ctx, original, box)
 	}
 
@@ -109,7 +109,7 @@ func (r *DevBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// status patch that moves the devbox to Stopped or Interrupted.
 	now := timeNow()
 	released := false
-	r.settleBilling(box, now)
+	r.settleMetering(box, now)
 
 	// Idle shutdown runs after the pod is observed, so it only stops a devbox
 	// that is actually running. The segment it just opened is closed here as
@@ -220,22 +220,28 @@ func (r *DevBoxReconciler) reconcileRunning(ctx context.Context, box *devpilotv1
 	log := logf.FromContext(ctx)
 
 	// An interruption is a resting state, not a retry: relaunching in place
-	// would fight the scheduler for the spot capacity that just went away and
-	// bill a GPU the user has not asked for again. The start action leaves it.
+	// would fight the scheduler for the preemptible capacity that just went
+	// away and consume a GPU the user has not asked for again. The start action
+	// leaves it.
 	if message, reclaimed := r.reclaim(ctx, box, pod); reclaimed {
+		podName := box.Status.PodName
+		if pod != nil {
+			podName = pod.Name
+		}
+		nodeName := box.Status.NodeName
 		r.markInterrupted(box, "Preempted", message)
-		if err := r.deletePod(ctx, pod.Name, box.Namespace); err != nil {
+		if err := r.deletePod(ctx, podName, box.Namespace); err != nil {
 			return ctrl.Result{}, err
 		}
 		if err := r.deletePrepullPod(ctx, box); err != nil {
 			return ctrl.Result{}, err
 		}
-		log.Info("DevBox interrupted", "pod", pod.Name, "node", box.Status.NodeName, "reason", message)
+		log.Info("DevBox interrupted", "pod", podName, "node", nodeName, "reason", message)
 		return ctrl.Result{}, nil
 	}
 	if box.Status.Phase == devpilotv1alpha1.PhaseInterrupted {
 		// A pod left behind by the interruption would otherwise be adopted on
-		// the next start and billed as if it had never stopped.
+		// the next start and metered as if it had never stopped.
 		if pod != nil {
 			if err := r.deletePod(ctx, pod.Name, box.Namespace); err != nil {
 				return ctrl.Result{}, err

@@ -24,7 +24,7 @@
 ### 1.2 双重损失：用户体验崩塌与昂贵 GPU 空转
 
 1. **破坏交互式“随用随关”心智**：开发机是强交互场景，用户点击“开机”期待在 10 秒内连上 VS Code Remote-SSH。若每次跨节点开机都要干等 20 分钟，用户会拒绝关机、抵触配置闲置自动关机（`idleShutdownMinutes`），导致集群 GPU 长期被闲置会话占死。
-2. **平台承担隐性算力空转成本**：在当前 `DevBoxReconciler` 设计中，计费账本（`status.segments[]`）从 Pod 真正进入 `Running` 才开始计费（用户不承担拉镜像期间的费用）；但 K8s 调度器在 `Starting (PullingImage)` 阶段**已经将整张/整机 GPU 独占分配给了该 Pod**。每次 20 分钟的冷拉取，都意味着平台白白损失 20 分钟的高价值 GPU 可售卖时长。
+2. **平台承担隐性算力空转成本**：在当前 `DevBoxReconciler` 设计中，计量台账（`status.segments[]`）从 Pod 真正进入 `Running` 才开始计量（不记录拉镜像期间的使用时长）；但 K8s 调度器在 `Starting (PullingImage)` 阶段**已经将整张/整机 GPU 独占分配给了该 Pod**。每次 20 分钟的冷拉取，都意味着平台白白损失 20 分钟的高价值 GPU 可用时长。
 
 ---
 

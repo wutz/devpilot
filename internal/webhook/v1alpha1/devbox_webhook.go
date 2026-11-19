@@ -61,9 +61,6 @@ func (d *DevBoxDefaulter) Default(_ context.Context, obj *devpilotv1alpha1.DevBo
 	if obj.Spec.DesiredState == "" {
 		obj.Spec.DesiredState = devpilotv1alpha1.DesiredStateRunning
 	}
-	if obj.Spec.BillingMode == "" {
-		obj.Spec.BillingMode = devpilotv1alpha1.BillingModeOnDemand
-	}
 	if obj.Spec.Access.SSH != nil && obj.Spec.Access.SSH.Username == "" {
 		obj.Spec.Access.SSH.Username = "root"
 	}
@@ -212,9 +209,9 @@ func validateImmutableFields(oldObj, newObj *devpilotv1alpha1.DevBox) field.Erro
 			fmt.Sprintf("the root disk was created from %s (%s); commit the devbox or reset the root disk before changing the base image",
 				oldObj.Status.ActiveImage, oldObj.Status.ActiveImageDigest)))
 	}
-	if oldObj.Spec.BillingMode != newObj.Spec.BillingMode {
-		errs = append(errs, field.Forbidden(field.NewPath("spec", "billingMode"),
-			"billingMode is immutable after creation"))
+	if oldObj.Spec.Preemptible != newObj.Spec.Preemptible {
+		errs = append(errs, field.Forbidden(field.NewPath("spec", "preemptible"),
+			"preemptible is immutable after creation"))
 	}
 	if oldObj.Spec.RootDisk.StorageClassName != newObj.Spec.RootDisk.StorageClassName {
 		errs = append(errs, field.Forbidden(field.NewPath("spec", "rootDisk", "storageClassName"),
